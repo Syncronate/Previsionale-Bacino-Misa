@@ -6,27 +6,49 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler, MinMaxScaler # Importa anche MinMaxScaler
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from sklearn.metrics import mean_absolute_error, r2_score
 import numpy as np
-from io import StringIO
-import matplotlib.pyplot as plt
 import pickle
 import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
+import matplotlib.pyplot as plt
+
+# Nomi colonne e sensori (devono corrispondere allo script di training)
+feature_columns = [
+    'cumulata_pioggia_sensore_1295', 'cumulata_pioggia_sensore_2637', 'cumulata_pioggia_sensore_2858', 'cumulata_pioggia_sensore_2964',
+    'umidita_sensore_3452',
+    'livello_idrometrico_sensore_1008', 'livello_idrometrico_sensore_1112', 'livello_idrometrico_sensore_1283',
+    'livello_idrometrico_sensore_3072', 'livello_idrometrico_sensore_3405'
+]
+target_sensors = [
+    'livello_idrometrico_sensore_1008', 'livello_idrometrico_sensore_1112', 'livello_idrometrico_sensore_1283',
+    'livello_idrometrico_sensore_3072', 'livello_idrometrico_sensore_3405'
+]
+sensor_names_mapping = { # Mappa nomi colonna -> nomi visualizzazione
+    'livello_idrometrico_sensore_1008': 'Sensore 1008 (Serra dei Conti)',
+    'livello_idrometrico_sensore_1112': 'Sensore 1112 (Bettolelle)',
+    'livello_idrometrico_sensore_1283': 'Sensore 1283 (Corinaldo/Nevola)',
+    'livello_idrometrico_sensore_3072': 'Sensore 3072 (Pianello di Ostra)',
+    'livello_idrometrico_sensore_3405': 'Sensore 3405 (Pianello di Ostra)'
+}
+
+input_window = 48 # Deve corrispondere allo script di training
+output_horizon = 24 # Deve corrispondere allo script di training
+num_sensors_out = len(target_sensors)
+num_features_in = len(feature_columns)
+
 
 ####################################################PARTE 1: DATA ENTRY (Streamlit) - Maschera per inserimento dati nel CSV####################################################
 def data_entry_form(df, file_path="dataset_idrologico.csv"):
-    """
-    Streamlit form for data entry to add new data to the hydrological dataset.
-    """
+    """Streamlit form for data entry to add new data to the hydrological dataset."""
     st.header("Inserimento Nuovo Evento Idrologico")
 
     next_event_id = get_next_event_id(df)
 
     fields_info = {
-        "data": {"label": "Data Evento", "type": "date", "default": datetime.now(), "streamlit_type": st.date_input}, # ADDED Data field
+        "data": {"label": "Data Evento", "type": "date", "default": datetime.now(), "streamlit_type": st.date_input},
         "evento": {"label": "ID Evento", "type": "int", "default": next_event_id, "streamlit_type": st.number_input, "kwargs": {"format": "%d", "disabled": True}},
         "saturazione_terreno": {"label": "Saturazione Terreno (%)", "type": "float", "default": 35.0, "streamlit_type": st.number_input, "kwargs": {"format": "%.2f"}},
         "ore_pioggia_totali": {"label": "Ore pioggia totali", "type": "float", "default": 0.0, "streamlit_type": st.number_input, "kwargs": {"format": "%.2f"}},
@@ -72,6 +94,7 @@ def data_entry_form(df, file_path="dataset_idrologico.csv"):
     if st.session_state.get('fields_cleared', False):
         clear_fields_streamlit(fields_info)
         st.session_state['fields_cleared'] = False # Reset flag after clearing
+
 
 def get_next_event_id(df):
     if df.empty:
@@ -178,7 +201,6 @@ def prepare_initial_dataset(output_file="dataset_idrologico.csv"):
         st.info(f"File {output_file} non trovato. Inizializzando un dataset vuoto.")
         return pd.DataFrame(columns=['data', 'evento', 'saturazione_terreno', 'ore_pioggia_totali', 'cumulata_totale', 'pioggia_gg_precedenti', 'intensità_media', 'idrometria_1008_inizio', 'idrometria_1112_inizio', 'idrometria_1112_max', 'idrometria_1283_inizio', 'idrometria_3072_inizio']) # Return empty DataFrame with columns including 'data'
 
-
 ####################################################PARTE 2: SIMULAZIONE - Maschera per inserimento dati di simulazione (Streamlit)####################################################
 def simulation_data_entry_form(feature_defaults, on_submit):
     """
@@ -203,107 +225,64 @@ def simulation_data_entry_form(feature_defaults, on_submit):
                 st.error("Verifica di aver inserito correttamente i valori numerici.")
 
 ####################################################Funzioni per salvare e caricare il modello####################################################
-def salva_modello(model, scaler, output_scaler, model_path="hydrological_model.pth", input_scaler_path="input_scaler.pth", output_scaler_path="output_scaler.pth"):
-    """
-    Salva il modello addestrato e gli scalers per un uso futuro.
-    """
-    # Salva il modello PyTorch
-    torch.save(model.state_dict(), model_path)
-    st.success(f"Modello salvato in {model_path}")
-
-    # Salva l'input scaler
-    torch.save(scaler, input_scaler_path)
-    st.success(f"Input Scaler salvato in {input_scaler_path}")
-
-    # Salva l'output scaler
-    torch.save(output_scaler, output_scaler_path)
-    st.success(f"Output Scaler salvato in {output_scaler_path}")
-
-
-def carica_modello(input_size, hidden_size, num_layers, output_size, model_path="hydrological_model.pth", input_scaler_path="input_scaler.pth", output_scaler_path="output_scaler.pth"):
-    """
-    Carica un modello precedentemente addestrato e gli scalers.
-    """
-    import os
-
-    if not os.path.exists(model_path) or not os.path.exists(input_scaler_path) or not os.path.exists(output_scaler_path):
-        return None, None, None
+def carica_modello_e_scaler(model_path="hydrological_lstm_model.pth", scaler_path="scaler.pkl"):
+    """Carica modello LSTM e scaler."""
+    device = torch.device('cpu') # Carica sempre su CPU per compatibilità Streamlit Cloud
 
     try:
-        # Inizializza un nuovo modello con la stessa architettura
-        model = HydrologicalLSTM(input_size, hidden_size, num_layers, output_size)
-        # Carica i parametri del modello salvato
-        model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu'))) # Load on CPU to avoid GPU issues
-        model.eval()  # Imposta il modello in modalità valutazione
-
-        # Carica l'input scaler
-        input_scaler = torch.load(input_scaler_path, map_location=torch.device('cpu'))
-
-        # Carica l'output scaler
-        output_scaler = torch.load(output_scaler_path, map_location=torch.device('cpu'))
-
-
-        st.success("Modello e scalers caricati con successo!")
-        return model, input_scaler, output_scaler
+        scaler = torch.load(scaler_path) # Carica scaler salvato come oggetto PyTorch
     except Exception as e:
-        st.error(f"Errore durante il caricamento del modello: {str(e)}")
-        return None, None, None
+        st.error(f"Errore caricando lo scaler: {e}")
+        return None, None
+
+    try:
+        # Inizializza il modello con gli stessi parametri usati in training
+        input_size = num_features_in
+        hidden_size = 64
+        num_layers = 2
+        output_size = output_horizon * num_sensors_out
+        model = HydrologicalLSTM(input_size, hidden_size, num_layers, output_size)
+        model.load_state_dict(torch.load(model_path, map_location=device))
+        model.eval() # Mettere in modalità valutazione
+        return model, scaler
+    except Exception as e:
+        st.error(f"Errore caricando il modello: {e}")
+        return None, None
+
 
 ####################################################PARTE 4: INTERFACCIA PER SIMULAZIONI MULTIPLE (Streamlit)####################################################
-def multiple_simulations_interface(model, input_scaler, output_scaler, features_cols, output_sensors, df):
-    """
-    Streamlit interface to run multiple simulations without retraining the model.
-    """
-    st.header("Simulazioni Multiple - Modello Addestrato")
+def multiple_simulations_interface(model, scaler, features_cols, df):
+    """Streamlit interface to run multiple simulations with LSTM model."""
+    st.header("Simulazioni Multiple - Modello LSTM Addestrato")
 
     sim_defaults = {
-        "cumulata_sensore_1295": 0.0,
-        "cumulata_sensore_2637": 0.0,
-        "cumulata_sensore_2858": 0.0,
-        "cumulata_sensore_2964": 0.0,
-        "umidita_sensore_3452": 50.0,
-        "livello_idrometrico_sensore_1008": 0.5,
-        "livello_idrometrico_sensore_1112": 0.8,
-        "livello_idrometrico_sensore_1283": 1.2,
-        "livello_idrometrico_sensore_3072": 0.7,
-        "livello_idrometrico_sensore_3405": 0.7
+        "cumulata_pioggia_sensore_1295": 0.0,
+        "cumulata_pioggia_sensore_2637": 0.0,
+        "cumulata_pioggia_sensore_2858": 0.0,
+        "cumulata_pioggia_sensore_2964": 0.0,
+        "umidita_sensore_3452": 70.0,
+        "livello_idrometrico_sensore_1008": 0.54,
+        "livello_idrometrico_sensore_1112": 1.18,
+        "livello_idrometrico_sensore_1283": 1.18,
+        "livello_idrometrico_sensore_3072": 0.89,
+        "livello_idrometrico_sensore_3405": 0.70,
     }
+    input_feature_names = list(sim_defaults.keys()) # Ordine deve corrispondere a feature_columns
 
-    # Aggiungi la possibilità di precompilare i campi da un evento esistente
-    if not df.empty:
-        st.subheader("Precompila campi da evento esistente")
-        eventi_disponibili = ["Nessuno (usa valori predefiniti)"] # Initialize with default option
-        for index, row in df.iterrows():
-            event_label = f"Evento ID: {row['evento']}, Data: {row['data'].strftime('%Y-%m-%d') if isinstance(row['data'], pd.Timestamp) else row['data']}, Cumulata: {row['cumulata_totale']:.2f}, Idro Max 1112: {row['idrometria_1112_max']:.2f}" # Formatted label
-            eventi_disponibili.append(event_label)
-
-        selected_event_label = st.selectbox("Seleziona evento", eventi_disponibili)
-
-        if selected_event_label != "Nessuno (usa valori predefiniti)":
-            selected_event_id = int(selected_event_label.split("Evento ID: ")[1].split(",")[0]) # Extract event ID from label
-            event_data = df[df['evento'] == selected_event_id].iloc[0]
-            for field in sim_defaults.keys():
-                if field in event_data:
-                    sim_defaults[field] = float(event_data[field])
-            st.success(f"Campi precompilati con evento {selected_event_id}")
-
-    # Container per il modulo di input e il grafico
+    # Container per input e grafico
     col1, col2 = st.columns([1, 2])
 
     with col1:
-        # Modulo di input più compatto
         with st.form("simulation_parameters_form"):
             st.subheader("Parametri simulazione")
             input_values = {}
-
-            for field, default in sim_defaults.items():
+            for field in input_feature_names: # Usa input_feature_names per l'ordine corretto
                 input_values[field] = st.number_input(
                     field,
-                    label=field.replace('_', ' ').title(), # Migliora la label
-                    value=default,
+                    value=sim_defaults[field],
                     format="%.2f",
                     step=0.01,
-                    label_visibility="visible" # or "collapsed" to hide labels above inputs
+                    label_visibility="visible"
                 )
 
             simulate_button = st.form_submit_button("Esegui Simulazione", use_container_width=True)
@@ -319,32 +298,22 @@ def multiple_simulations_interface(model, input_scaler, output_scaler, features_
     # Visualizzazione risultati simulazione
     if st.session_state.get('simulation_run', False):
         input_values = st.session_state.get('simulation_input_values', sim_defaults)
-        input_list = [input_values[feature] for feature in sim_defaults] # Ordine coerente con features_cols
-        values = get_simulation_input_values(input_list) # Ora accetta una lista
+        values = get_simulation_input_values(input_values, input_feature_names) # Passa anche i nomi delle features
 
         if values is not None:
-            # Esegui la previsione multi-step e multi-output
-            predizioni_scalate = simula_previsione(
-                model, input_scaler, values
-            )
+            # Esegui la previsione LSTM
+            previsioni_lstm_scaled = simula_previsione_lstm(model, scaler, values, input_feature_names)
+            previsioni_lstm = scaler.inverse_transform(np.concatenate([np.zeros((1, len(feature_columns)-num_sensors_out)), previsioni_lstm_scaled.reshape(1, num_sensors_out)], axis=1))[:, -num_sensors_out:].flatten() # Inverse transform solo le idrometrie
 
-            # De-normalizza le previsioni
-            predizioni_np = output_scaler.inverse_transform(predizioni_scalate)
-            predizioni_df = pd.DataFrame(predizioni_np, columns=output_sensors) # DataFrame per facilità
-
-            # Memorizza i risultati della previsione nella session state
-            st.session_state['predizioni_df'] = predizioni_df
+            # Memorizza risultati
+            st.session_state['previsioni_lstm'] = previsioni_lstm
             st.session_state['valori_input'] = values
 
-            # Genera e visualizza il grafico Plotly per le previsioni multi-sensore
+            # Visualizza grafico Plotly
             with col2:
-                fig_plotly = visualizza_previsione_multi_sensore_plotly(predizioni_df, output_sensors)
+                fig_plotly = visualizza_previsione_plotly_lstm(previsioni_lstm, target_sensors, sensor_names_mapping)
                 st.plotly_chart(fig_plotly, use_container_width=True)
 
-        st.session_state['simulation_run'] = False
-        st.session_state['simulation_input_values'] = None
-
-    # Se è la prima visualizzazione, mostra un placeholder
     elif col2.container():
         with col2:
             st.info("Inserisci i parametri e clicca 'Esegui Simulazione' per vedere i risultati.")
@@ -356,132 +325,81 @@ def multiple_simulations_interface(model, input_scaler, output_scaler, features_
 
 def clear_simulation_fields_streamlit(sim_defaults):
     """Pulisce i campi di input simulazione e li resetta ai valori predefiniti."""
-    for field, default in sim_defaults.items():
-        sim_defaults[field] = default # No need to set value directly, Streamlit form will handle on re-run
-    st.session_state['simulation_fields_cleared'] = True # Set flag to re-render form with cleared fields
+    for field in sim_defaults.keys():
+        sim_defaults[field] = sim_defaults[field] # Streamlit form gestirà il reset
+    st.session_state['simulation_fields_cleared'] = True
 
-
-def get_simulation_input_values(input_list): # Ora accetta una lista di valori
-    """Ottiene i valori di input dai campi simulazione."""
+def get_simulation_input_values(input_values, input_feature_names):
+    """Ottiene i valori di input dai campi simulazione nell'ordine corretto."""
     try:
-        values = [float(str(val).replace(',', '.')) for val in input_list] # Converte la lista
-        return values
+        values = []
+        for field in input_feature_names: # Itera secondo l'ordine dei nomi delle features
+            value = float(str(input_values[field]).replace(',', '.'))
+            values.append(value)
+        return np.array(values)
     except ValueError:
         st.error("Inserisci valori numerici validi in tutti i campi di simulazione!")
         return None
 
-def run_simulation_streamlit(model, input_scaler, output_scaler, input_values): # Scalers aggiunti
-    """Esegui la simulazione con i parametri correnti."""
-    values = get_simulation_input_values(input_values)
-    if values is None:
-        return
-
-    # Esegui la previsione
-    predizioni_scalate = simula_previsione(
-        model, input_scaler, values
-    )
-    # De-normalizza (esempio - potresti aver bisogno di un output_scaler)
-    predizioni_np = output_scaler.inverse_transform(predizioni_scalate)
-    predizioni_df = pd.DataFrame(predizioni_np, columns=output_sensors) # Assumi output_sensors definito globalmente
-
-    # Crea e visualizza il grafico
-    fig = visualizza_previsione_multi_sensore_plotly(predizioni_df, output_sensors) # Funzione per multi-sensore
-    st.plotly_chart(fig)
-
 
 ####################################################
-# Funzione di simulazione della previsione (MODIFICATA per LSTM multi-step)
+# Funzione di simulazione della previsione LSTM
 ####################################################
-def simula_previsione(modello, input_scaler, input_features_values):
+def simula_previsione_lstm(modello, scaler, input_features_values, input_feature_names):
+    """Esegue la previsione con il modello LSTM."""
     modello.eval()
+    device = torch.device('cpu') # Assicura che sia su CPU per Streamlit Cloud
+
+    # 1. Prepara input: Assicurati che l'ordine delle features corrisponda al training
+    input_dict = {name: value for name, value in zip(input_feature_names, input_features_values)}
+    ordered_input_values = np.array([input_dict[feature] for feature in feature_columns]) # Ordina secondo feature_columns
+    input_features_values_reshaped = ordered_input_values.reshape(1, -1) # Reshape a 2D array (sample, features)
+
+    # 2. Scaling dell'input
+    input_scaled = scaler.transform(input_features_values_reshaped)
+    input_tensor = torch.tensor(input_scaled, dtype=torch.float32).unsqueeze(0).to(device) # Aggiungi dimensione sequenza (lunghezza 1)
+
+    # 3. Previsione con LSTM
     with torch.no_grad():
-        nuovi_dati_input_np = np.array(input_features_values).reshape(1, -1) # Reshape per una singola sequenza
-        nuovi_dati_input_scaled = input_scaler.transform(nuovi_dati_input_np)
-        nuovi_dati_input_tensor = torch.tensor(nuovi_dati_input_scaled, dtype=torch.float32).unsqueeze(1) # Aggiungi dimensione sequenza (lunghezza 1 per input iniziale)
+        prediction_scaled = modello(input_tensor) # Ottieni previsione scalata
 
-        # Estendi l'input per la lunghezza della sequenza di input richiesta dal modello
-        sequence_length_in = 24 # Assumi lunghezza sequenza input definita (o passala come parametro)
-        input_sequence = nuovi_dati_input_tensor.repeat(1, sequence_length_in, 1) # Duplica l'input iniziale per formare una sequenza fittizia
-
-        predizioni_tensor = modello(input_sequence) # Passa la sequenza al modello LSTM
-        predizioni_scalate = predizioni_tensor.cpu().numpy() # Prendi le previsioni e converti in numpy array
-
-    return predizioni_scalate # Restituisce le previsioni scalate per tutti i sensori e timestep
+    return prediction_scaled.cpu().numpy().reshape(output_horizon, num_sensors_out) # Reshape e converti in numpy
 
 
 ####################################################
-# NUOVA FUNZIONE: Visualizzazione Plotly interattiva per multi-sensore e multi-step
+# NUOVA FUNZIONE: Visualizzazione Plotly interattiva per LSTM (Multi-output, Multi-step)
 ####################################################
-def visualizza_previsione_multi_sensore_plotly(predizioni_df, output_sensors):
-    """
-    Crea una visualizzazione interattiva delle previsioni multi-sensore usando Plotly.
-    """
+def visualizza_previsione_plotly_lstm(previsioni, target_sensors, sensor_names_mapping):
+    """Visualizza previsioni LSTM multi-step e multi-output con Plotly."""
     fig = go.Figure()
+    time_steps = np.arange(1, output_horizon + 1) # 12 ore di previsione (24 passi a 30 min)
 
-    time_steps = list(range(1, len(predizioni_df) + 1)) # Assi X come timesteps (ore future)
-
-    for sensor in output_sensors:
+    for i, sensor_col in enumerate(target_sensors):
+        sensor_name = sensor_names_mapping.get(sensor_col, sensor_col) # Usa nome visualizzazione se disponibile
         fig.add_trace(go.Scatter(
             x=time_steps,
-            y=predizioni_df[sensor],
-            mode='lines+markers',
-            name=sensor.replace('_', ' ').title()
+            y=previsioni[:, i],
+            mode='lines',
+            name=sensor_name
         ))
 
     fig.update_layout(
-        title='Previsioni Idrometriche Multi-Sensore (Prossime 12 Ore)',
-        xaxis_title='Ore Successive',
+        title='Previsioni Livelli Idrometrici (LSTM) - Prossime 12 Ore',
+        xaxis_title='Passo Temporale (ogni 30 minuti)',
         yaxis_title='Livello Idrometrico (m)',
         template="plotly_dark",
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1
-        )
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
     )
     return fig
 
 
 ####################################################
-# Definizione del Modello LSTM PyTorch (Deve corrispondere all'architettura usata per l'addestramento)
+# MAIN: Esecuzione sequenziale Streamlit
 ####################################################
-class HydrologicalLSTM(nn.Module):
-    def __init__(self, input_size, hidden_size, num_layers, output_size):
-        super(HydrologicalLSTM, self).__init__()
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
-        self.fc = nn.Linear(hidden_size, output_size) # Output layer per output_size (n. sensori)
-
-    def forward(self, x):
-        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
-        c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
-        out, _ = self.lstm(x, (h0, c0))
-
-        # Prendi solo l'output dell'ultimo timestep per la previsione multi-step (ora corretto per multi-output)
-        out = self.fc(out[:, -1, :]) # Applica FC layer all'ultimo timestep
-        return out
-
-
-####################################################MAIN: Esecuzione sequenziale: Data Entry -> Inserimento dati simulazione -> Simulazione (Streamlit Main)####################################################
 if __name__ == "__main__":
-    st.title("Dashboard Idrologico")
+    st.title("Dashboard Idrologico - LSTM")
 
-    # Definisci le colonne di input e output (devono corrispondere allo script di training)
-    input_features_cols = [
-        'cumulata_sensore_1295', 'cumulata_sensore_2637', 'cumulata_sensore_2858', 'cumulata_sensore_2964',
-        'umidita_sensore_3452',
-        'livello_idrometrico_sensore_1008', 'livello_idrometrico_sensore_1112', 'livello_idrometrico_sensore_1283',
-        'livello_idrometrico_sensore_3072', 'livello_idrometrico_sensore_3405'
-    ]
-    output_sensors_cols = [
-        'livello_idrometrico_sensore_1008', 'livello_idrometrico_sensore_1112', 'livello_idrometrico_sensore_1283',
-        'livello_idrometrico_sensore_3072', 'livello_idrometrico_sensore_3405'
-    ]
-
-    # Initialize session state for dataset and flags
+    # Inizializza session state
     if 'dataset' not in st.session_state:
         st.session_state['dataset'] = prepare_initial_dataset()
     if 'dataset_view' not in st.session_state:
@@ -496,60 +414,42 @@ if __name__ == "__main__":
         st.session_state['simulation_input_values'] = None
     if 'simulation_plot' not in st.session_state:
         st.session_state['simulation_plot'] = None
-    if 'predizioni_df' not in st.session_state:
-        st.session_state['predizioni_df'] = None
+    if 'previsioni_lstm' not in st.session_state:
+        st.session_state['previsioni_lstm'] = None
     if 'valori_input' not in st.session_state:
         st.session_state['valori_input'] = None
     if 'retrain_model' not in st.session_state:
-        st.session_state['retrain_model'] = False # Inizializza la variabile per il riallenamento
-
+        st.session_state['retrain_model'] = False
 
     dataset_csv = "dataset_idrologico.csv"
     df = st.session_state['dataset']
 
-    # PART 1: Data Entry Form
+    # PARTE 1: Data Entry Form
     with st.expander("Inserimento Dati", expanded=False):
         data_entry_form(df, file_path=dataset_csv)
-    df = pd.read_csv(dataset_csv, sep='\t', dtype=str) # Reload dataset after potential save operation
+    df = pd.read_csv(dataset_csv, sep='\t', dtype=str) # Ricarica dataset dopo salvataggio
     df.columns = df.columns.str.strip().str.lower().str.replace(' ', '_')
 
     for col in df.columns:
-        if col != 'evento' and col != 'data': # Exclude 'data' column from numeric conversion
+        if col != 'evento' and col != 'data':
             df[col] = df[col].str.replace(',', '.', regex=False).astype(float)
     df['evento'] = df['evento'].astype(int)
-    if 'data' in df.columns: # Convert 'data' column to datetime after reload
+    if 'data' in df.columns:
         try:
             df['data'] = pd.to_datetime(df['data'])
         except (ValueError, TypeError):
-            st.warning("Impossibile convertire la colonna 'data' in formato data. Verificare il formato nel CSV.")
-    st.session_state['dataset'] = df # Update dataset in session state
+            st.warning("Impossibile convertire colonna 'data' in formato data.")
+    st.session_state['dataset'] = df
 
+    # Carica modello e scaler addestrati
+    model_lstm, scaler_lstm = carica_modello_e_scaler()
 
-    # Caricamento modello e scalers (parametri devono corrispondere allo script di training)
-    input_size = len(input_features_cols)
-    hidden_size = 64
-    num_layers = 2
-    output_size = len(output_sensors_cols)
-    model, input_scaler, output_scaler = carica_modello(input_size, hidden_size, num_layers, output_size)
+    # PARTE 4: Interfaccia Simulazioni Multiple (LSTM)
+    with st.expander("Simulazioni Multiple LSTM", expanded=True):
+        if model_lstm and scaler_lstm:
+            multiple_simulations_interface(model_lstm, scaler_lstm, feature_columns, df)
+        else:
+            st.error("Modello LSTM o scaler non caricati. Assicurati che i file 'hydrological_lstm_model.pth' e 'scaler.pkl' siano presenti nella directory.")
 
-
-    if model is None or input_scaler is None or output_scaler is None or st.session_state.get('retrain_model'): # Condizione MODIFICATA
-        st.warning("Modello non trovato o richiesto riallenamento. Esegui lo script di training `training_script.py` per addestrare e salvare il modello, poi riavvia l'app.")
-        if st.session_state.get('retrain_model'):
-            st.session_state['retrain_model'] = False # Resetta flag
-            st.sidebar.info("Riallenamento richiesto. Esegui lo script `training_script.py`.")
-    else:
-        # PART 4: Multiple Simulations Interface
-        with st.expander("Simulazioni Multiple", expanded=True):
-            multiple_simulations_interface(model, input_scaler, output_scaler, input_features_cols, output_sensors_cols, df)
-
-        st.sidebar.header("Informazioni")
-        st.sidebar.info("Questa dashboard permette l'inserimento di dati idrologici, la visualizzazione del dataset, e l'esecuzione di simulazioni previsionali multi-step e multi-output sui livelli idrometrici. La parte grafica della simulazione è integrata direttamente nella dashboard sotto il form di simulazione.")
-
-        # Aggiungi il pulsante per riallenare il modello (AGGIUNTO)
-        if st.sidebar.button("Riallena Modello"):
-            st.session_state['retrain_model'] = True
-            st.sidebar.info("Per riallenare il modello, esegui lo script `training_script.py` separatamente.") # Istruzioni chiare
-
-
-# (INCOLLA QUI TUTTO IL CODICE DEL TUO VECCHIO SIMULATORE)
+    st.sidebar.header("Informazioni")
+    st.sidebar.info("Dashboard per inserimento dati idrologici, visualizzazione dataset e simulazioni previsionali con modello LSTM. La parte grafica è integrata sotto il form di simulazione.")
