@@ -3,15 +3,15 @@ import torch
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import seaborn as sns  # Make sure seaborn is installed: pip install seaborn
+import seaborn as sns
 import torch.nn as nn
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.model_selection import train_test_split
 import os
 import io
 import base64
 from datetime import datetime, timedelta
-import joblib  # Import joblib for saving scalers
+import joblib
+from sklearn.model_selection import train_test_split
 
 # Ripristino delle classi e funzioni dal modello originale
 class HydroLSTM(nn.Module):
@@ -57,80 +57,6 @@ class HydroLSTM(nn.Module):
         out = out.view(out.size(0), self.output_window, self.output_size)
 
         return out
-
-# Funzione per allenare il modello
-def train_model(df, feature_columns, hydro_features, input_window, output_window, model_path, scaler_features_path, scaler_targets_path, epochs=100, batch_size=64, learning_rate=0.001):
-    st.info("Inizio addestramento modello...")
-
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    st.info(f"Utilizzo dispositivo: {device}")
-
-    # Preparazione dati
-    data = df[feature_columns].values
-    targets = df[hydro_features].values
-
-    # Scaler
-    scaler_features = MinMaxScaler()
-    scaler_targets = MinMaxScaler()
-
-    scaled_data = scaler_features.fit_transform(data)
-    scaled_targets = scaler_targets.fit_transform(targets)
-
-    joblib.dump(scaler_features, scaler_features_path)
-    joblib.dump(scaler_targets, scaler_targets_path)
-    st.info("Scaler salvati.")
-
-    # Creazione sequenze
-    def create_sequences(input_data, output_data, input_window, output_window):
-        X, y = [], []
-        L = len(input_data)
-        for i in range(L - input_window - output_window + 1):
-            input_seq = input_data[i:i+input_window]
-            output_seq = output_data[i+input_window:i+input_window+output_window]
-            X.append(input_seq)
-            y.append(output_seq)
-        return np.array(X), np.array(y)
-
-    X, y = create_sequences(scaled_data, scaled_targets, input_window, output_window)
-    X = torch.FloatTensor(X).to(device)
-    y = torch.FloatTensor(y).to(device)
-
-    # Split train/val
-    X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, shuffle=False)
-    st.info(f"Dati divisi: Train={len(X_train)}, Val={len(X_val)}")
-
-    # Model, Loss, Optimizer
-    input_size = X_train.shape[2]
-    output_size = y_train.shape[2]
-    HIDDEN_SIZE = 128
-    NUM_LAYERS = 2
-    model = HydroLSTM(input_size, HIDDEN_SIZE, output_size, output_window, NUM_LAYERS).to(device)
-    criterion = nn.MSELoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-
-    # Training loop
-    st.info("Inizio ciclo di addestramento...")
-    for epoch in range(epochs):
-        model.train()
-        optimizer.zero_grad()
-        outputs = model(X_train)
-        loss = criterion(outputs, y_train)
-        loss.backward()
-        optimizer.step()
-
-        # Validation
-        model.eval()
-        with torch.no_grad():
-            val_outputs = model(X_val)
-            val_loss = criterion(val_outputs, y_val)
-
-        if (epoch+1) % 10 == 0:
-            st.info(f'Epoch [{epoch+1}/{epochs}], Train Loss: {loss.item():.4f}, Val Loss: {val_loss.item():.4f}')
-
-    # Salva modello
-    torch.save(model.state_dict(), model_path)
-    st.success(f"Modello addestrato e salvato in: {model_path}")
-    return model # Return the trained model
 
 # Funzione per caricare il modello addestrato
 @st.cache_resource
@@ -242,6 +168,125 @@ def get_image_download_link(fig, filename, text):
     b64 = base64.b64encode(buf.getvalue()).decode()
     return f'<a href="data:image/png;base64,{b64}" download="{filename}">Scarica {text}</a>'
 
+# Funzione per scaricare modello e scaler
+def get_binary_file_downloader_html(bin_file, file_label):
+    with open(bin_file, 'rb') as f:
+        data = f.read()
+    b64 = base64.b64encode(data).decode()
+    return f'<a href="data:application/octet-stream;base64,{b64}" download="{os.path.basename(bin_file)}">{file_label}</a>'
+
+# Funzione per preparare i dati per l'addestramento
+def prepare_training_data(df, feature_columns, hydro_features, input_window, output_window):
+    """
+    Prepara i dati per l'addestramento, creando sequenze di input e output.
+
+    Args:
+        df: DataFrame con i dati
+        feature_columns: Colonne da usare come features
+        hydro_features: Colonne dei sensori idrometrici (target)
+        input_window: Numero di timestep per l'input
+        output_window: Numero di timestep per l'output
+
+    Returns:
+        X: Sequenze di input
+        y: Sequenze di output
+    """
+    X = []
+    y = []
+
+    # Otteniamo i dati normalizzati
+    features = df[feature_columns].values
+    targets = df[hydro_features].values
+
+    # Creiamo le sequenze
+    for i in range(len(df) - input_window - output_window + 1):
+        X.append(features[i:i+input_window])
+        y.append(targets[i+input_window:i+input_window+output_window])
+
+    return np.array(X), np.array(y)
+
+# Funzione per addestrare il modello
+def train_model(X_train, y_train, X_val, y_val, input_size, output_size, output_window,
+                hidden_size, num_layers, learning_rate, batch_size, epochs, device):
+    """
+    Addestra il modello LSTM.
+
+    Args:
+        X_train, y_train: Dati di addestramento
+        X_val, y_val: Dati di validazione
+        input_size: Dimensione dell'input (numero di features)
+        output_size: Dimensione dell'output (numero di sensori idrometrici)
+        output_window: Numero di timestep per l'output
+        hidden_size: Dimensione dello stato nascosto della LSTM
+        num_layers: Numero di layer LSTM
+        learning_rate: Learning rate per l'ottimizzatore
+        batch_size: Dimensione del batch
+        epochs: Numero di epoche
+        device: Device per l'addestramento (CPU/GPU)
+
+    Returns:
+        model: Modello addestrato
+        train_losses: Lista delle loss di addestramento
+        val_losses: Lista delle loss di validazione
+    """
+    # Creazione del modello
+    model = HydroLSTM(input_size, hidden_size, output_size, output_window, num_layers).to(device)
+
+    # Definizione del loss e dell'ottimizzatore
+    criterion = nn.MSELoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+
+    # Preparazione dei dati
+    X_train_tensor = torch.FloatTensor(X_train).to(device)
+    y_train_tensor = torch.FloatTensor(y_train).to(device)
+    X_val_tensor = torch.FloatTensor(X_val).to(device)
+    y_val_tensor = torch.FloatTensor(y_val).to(device)
+
+    # Liste per memorizzare le loss
+    train_losses = []
+    val_losses = []
+
+    # Addestramento
+    for epoch in range(epochs):
+        model.train()
+        train_loss = 0
+
+        # Creazione dei batch
+        for i in range(0, len(X_train), batch_size):
+            # Otteniamo il batch
+            batch_X = X_train_tensor[i:i+batch_size]
+            batch_y = y_train_tensor[i:i+batch_size]
+
+            # Forward pass
+            outputs = model(batch_X)
+            loss = criterion(outputs, batch_y)
+
+            # Backward pass e ottimizzazione
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            train_loss += loss.item()
+
+        # Validazione
+        model.eval()
+        with torch.no_grad():
+            val_outputs = model(X_val_tensor)
+            val_loss = criterion(val_outputs, y_val_tensor).item()
+
+        # Calcolo delle loss medie
+        train_loss = train_loss / (len(X_train) / batch_size)
+
+        # Aggiungiamo le loss alle liste
+        train_losses.append(train_loss)
+        val_losses.append(val_loss)
+
+        # Stampa delle loss
+        if (epoch + 1) % 10 == 0:
+            print(f'Epoch [{epoch+1}/{epochs}], Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}')
+
+    return model, train_losses, val_losses
+
 # Titolo dell'app
 st.title('Dashboard Modello Predittivo Idrologico')
 
@@ -291,7 +336,7 @@ OUTPUT_WINDOW = 12  # 12 ore di previsione
 
 # Caricamento dei dati storici
 try:
-    df = pd.read_csv(DATA_PATH, sep=';', parse_dates=['Data e Ora'], decimal=',') # Added decimal=','
+    df = pd.read_csv(DATA_PATH, sep=';', parse_dates=['Data e Ora'])
     st.sidebar.success(f'Dati caricati: {len(df)} righe')
 except Exception as e:
     st.error(f'Errore nel caricamento dei dati: {e}')
@@ -318,37 +363,18 @@ hydro_features = [
 feature_columns = rain_features + humidity_feature + hydro_features
 
 # Caricamento del modello e degli scaler
-model = None # Initialize model to None
-scaler_features = None
-scaler_targets = None
-
-if os.path.exists(MODEL_PATH) and os.path.exists(SCALER_FEATURES_PATH) and os.path.exists(SCALER_TARGETS_PATH):
-    try:
-        model, device = load_model(MODEL_PATH, len(feature_columns), len(hydro_features), OUTPUT_WINDOW)
-        scaler_features, scaler_targets = load_scalers(SCALER_FEATURES_PATH, SCALER_TARGETS_PATH)
-        st.sidebar.success('Modello e scaler caricati con successo')
-    except Exception as e:
-        st.error(f'Errore nel caricamento del modello o degli scaler: {e}')
-        st.stop()
-else:
-    st.sidebar.warning('Nessun modello pre-addestrato trovato.')
-    if st.sidebar.button("Addestra Modello"):
-        with st.spinner('Addestramento modello in corso...'):
-            try:
-                model = train_model(df.copy(), feature_columns, hydro_features, INPUT_WINDOW, OUTPUT_WINDOW, MODEL_PATH, SCALER_FEATURES_PATH, SCALER_TARGETS_PATH) # Pass a copy of df
-                scaler_features, scaler_targets = load_scalers(SCALER_FEATURES_PATH, SCALER_TARGETS_PATH) # Reload scalers after training
-                model, device = load_model(MODEL_PATH, len(feature_columns), len(hydro_features), OUTPUT_WINDOW) # Reload model after training
-                st.sidebar.success('Modello addestrato e caricato con successo!')
-            except Exception as e:
-                st.error(f'Errore durante l\'addestramento del modello: {e}')
-                st.error(e) # Print full exception for debugging
-                model = None # Ensure model is set to None if training fails
-
+try:
+    model, device = load_model(MODEL_PATH, len(feature_columns), len(hydro_features), OUTPUT_WINDOW)
+    scaler_features, scaler_targets = load_scalers(SCALER_FEATURES_PATH, SCALER_TARGETS_PATH)
+    st.sidebar.success('Modello e scaler caricati con successo')
+except Exception as e:
+    st.error(f'Errore nel caricamento del modello o degli scaler: {e}')
+    st.stop()
 
 # Menu principale
 st.sidebar.header('Menu')
 page = st.sidebar.radio('Scegli una funzionalità',
-                        ['Dashboard', 'Simulazione', 'Analisi Dati Storici'])
+                        ['Dashboard', 'Simulazione', 'Analisi Dati Storici', 'Addestramento Modello'])
 
 if page == 'Dashboard':
     st.header('Dashboard Idrologica')
@@ -386,9 +412,7 @@ if page == 'Dashboard':
     # Previsione basata sugli ultimi dati disponibili
     st.header('Previsione in base agli ultimi dati')
 
-    if model is None:
-        st.warning("Modello non disponibile. Addestra il modello nella sidebar per abilitare le previsioni.")
-    elif st.button('Genera previsione'):
+    if st.button('Genera previsione'):
         with st.spinner('Generazione previsione in corso...'):
             # Preparazione dei dati di input (ultime INPUT_WINDOW ore)
             latest_data = df.iloc[-INPUT_WINDOW:][feature_columns].values
@@ -426,88 +450,85 @@ elif page == 'Simulazione':
     st.header('Simulazione Idrologica')
     st.write('Inserisci i valori per simulare uno scenario idrologico')
 
-    if model is None:
-        st.warning("Modello non disponibile. Addestra il modello nella sidebar per abilitare la simulazione.")
-    else:
-        # Opzioni per la simulazione
-        sim_method = st.radio(
-            "Metodo di simulazione",
-            ['Modifica dati recenti', 'Inserisci manualmente tutti i valori']
-        )
+    # Opzioni per la simulazione
+    sim_method = st.radio(
+        "Metodo di simulazione",
+        ['Modifica dati recenti', 'Inserisci manualmente tutti i valori']
+    )
 
-        if sim_method == 'Modifica dati recenti':
-            # Prendiamo i dati recenti come base
-            recent_data = df.iloc[-INPUT_WINDOW:][feature_columns].copy()
+    if sim_method == 'Modifica dati recenti':
+        # Prendiamo i dati recenti come base
+        recent_data = df.iloc[-INPUT_WINDOW:][feature_columns].copy()
 
-            # Permettiamo all'utente di modificare la pioggia
-            st.subheader('Modifica valori di pioggia')
-            rain_multiplier = st.slider('Fattore moltiplicativo pioggia', 0.0, 5.0, 1.0, 0.1)
+        # Permettiamo all'utente di modificare la pioggia
+        st.subheader('Modifica valori di pioggia')
+        rain_multiplier = st.slider('Fattore moltiplicativo pioggia', 0.0, 5.0, 1.0, 0.1)
 
-            # Modifichiamo i valori di pioggia
-            for col in rain_features:
-                recent_data[col] = recent_data[col] * rain_multiplier
+        # Modifichiamo i valori di pioggia
+        for col in rain_features:
+            recent_data[col] = recent_data[col] * rain_multiplier
 
-            # Permettiamo all'utente di modificare l'umidità
-            st.subheader('Modifica valori di umidità')
-            humidity_value = st.slider('Umidità (%)', 0.0, 100.0, float(recent_data[humidity_feature[0]].mean()), 0.5)
-            recent_data[humidity_feature[0]] = humidity_value
+        # Permettiamo all'utente di modificare l'umidità
+        st.subheader('Modifica valori di umidità')
+        humidity_value = st.slider('Umidità (%)', 0.0, 100.0, float(recent_data[humidity_feature[0]].mean()), 0.5)
+        recent_data[humidity_feature[0]] = humidity_value
 
-            # Prendiamo i valori modificati
-            sim_data = recent_data.values
+        # Prendiamo i valori modificati
+        sim_data = recent_data.values
 
-        else:  # Inserimento manuale completo
-            st.subheader('Inserisci valori per ogni parametro')
+    else:  # Inserimento manuale completo
+        st.subheader('Inserisci valori per ogni parametro')
 
-            # Creiamo un dataframe vuoto per i dati della simulazione
-            sim_data = np.zeros((INPUT_WINDOW, len(feature_columns)))
+        # Creiamo un dataframe vuoto per i dati della simulazione
+        sim_data = np.zeros((INPUT_WINDOW, len(feature_columns)))
 
-            # Raggruppiamo i controlli per tipo di sensore
-            with st.expander("Imposta valori di pioggia"):
-                for i, feature in enumerate(rain_features):
-                    value = st.number_input(f'{feature} (mm)', 0.0, 100.0, 0.0, 0.5)
-                    sim_data[:, i] = value
+        # Raggruppiamo i controlli per tipo di sensore
+        with st.expander("Imposta valori di pioggia"):
+            for i, feature in enumerate(rain_features):
+                value = st.number_input(f'{feature} (mm)', 0.0, 100.0, 0.0, 0.5)
+                sim_data[:, i] = value
 
-            with st.expander("Imposta valore di umidità"):
-                value = st.number_input(f'{humidity_feature[0]} (%)', 0.0, 100.0, 50.0, 0.5)
-                sim_data[:, len(rain_features)] = value
+        with st.expander("Imposta valore di umidità"):
+            value = st.number_input(f'{humidity_feature[0]} (%)', 0.0, 100.0, 50.0, 0.5)
+            sim_data[:, len(rain_features)] = value
 
-            with st.expander("Imposta livelli idrometrici"):
-                offset = len(rain_features) + len(humidity_feature)
-                for i, feature in enumerate(hydro_features):
-                    value = st.number_input(f'{feature} (m)', -1.0, 10.0, 0.0, 0.01)
-                    sim_data[:, offset + i] = value
+        with st.expander("Imposta livelli idrometrici"):
+            offset = len(rain_features) + len(humidity_feature)
+            for i, feature in enumerate(hydro_features):
+                value = st.number_input(f'{feature} (m)', -1.0, 10.0, 0.0, 0.01)
+                sim_data[:, offset + i] = value
 
-        # Bottone per eseguire la simulazione
-        if st.button('Esegui simulazione'):
-            with st.spinner('Simulazione in corso...'):
-                # Previsione
-                predictions = predict(model, sim_data, scaler_features, scaler_targets, hydro_features, device, OUTPUT_WINDOW)
+    # Bottone per eseguire la simulazione
+    if st.button('Esegui simulazione'):
+        with st.spinner('Simulazione in corso...'):
+            # Previsione
+            predictions = predict(model, sim_data, scaler_features, scaler_targets, hydro_features, device, OUTPUT_WINDOW)
 
-                # Visualizzazione dei risultati
-                st.subheader(f'Previsione per le prossime {OUTPUT_WINDOW} ore')
+            # Visualizzazione dei risultati
+            st.subheader(f'Previsione per le prossime {OUTPUT_WINDOW} ore')
 
-                # Creazione dataframe risultati
-                current_time = datetime.now()
-                prediction_times = [current_time + timedelta(hours=i) for i in range(OUTPUT_WINDOW)]
-                results_df = pd.DataFrame(predictions, columns=hydro_features)
-                results_df['Ora previsione'] = prediction_times
-                results_df = results_df[['Ora previsione'] + hydro_features]
+            # Creazione dataframe risultati
+            current_time = datetime.now()
+            prediction_times = [current_time + timedelta(hours=i) for i in range(OUTPUT_WINDOW)]
+            results_df = pd.DataFrame(predictions, columns=hydro_features)
+            results_df['Ora previsione'] = prediction_times
+            results_df = results_df[['Ora previsione'] + hydro_features]
 
-                # Visualizzazione tabella risultati
-                st.dataframe(results_df.round(3))
+            # Visualizzazione tabella risultati
+            st.dataframe(results_df.round(3))
 
-                # Download dei risultati
-                st.markdown(get_table_download_link(results_df), unsafe_allow_html=True)
+            # Download dei risultati
+            st.markdown(get_table_download_link(results_df), unsafe_allow_html=True)
 
-                # Grafici per ogni sensore
-                st.subheader('Grafici delle previsioni')
-                figs = plot_predictions(predictions, hydro_features, OUTPUT_WINDOW, current_time)
+            # Grafici per ogni sensore
+            st.subheader('Grafici delle previsioni')
+            figs = plot_predictions(predictions, hydro_features, OUTPUT_WINDOW, current_time)
 
-                # Visualizzazione grafici
-                for i, fig in enumerate(figs):
-                    st.pyplot(fig)
-                    sensor_name = hydro_features[i].replace(' ', '_').replace('/', '_')
-                    st.markdown(get_image_download_link(fig, f"sim_{sensor_name}.png", f"il grafico di {hydro_features[i]}"), unsafe_allow_html=True)
+            # Visualizzazione grafici
+            for i, fig in enumerate(figs):
+                st.pyplot(fig)
+                sensor_name = hydro_features[i].replace(' ', '_').replace('/', '_')
+                st.markdown(get_image_download_link(fig, f"sim_{sensor_name}.png", f"il grafico di {hydro_features[i]}"), unsafe_allow_html=True)
 
 elif page == 'Analisi Dati Storici':
     st.header('Analisi Dati Storici')
@@ -594,42 +615,117 @@ elif page == 'Analisi Dati Storici':
                 if len(corr_features) == 2:
                     fig, ax = plt.subplots(figsize=(10, 6))
                     sns.scatterplot(data=filtered_df, x=corr_features[0], y=corr_features[1], ax=ax)
-                    plt.title(f'Scatterplot {corr_features[0]} vs {corr_features[1]}')
+                    ax.set_title(f'Scatterplot: {corr_features[0]} vs {corr_features[1]}')
+                    plt.grid(True)
                     plt.tight_layout()
-
                     st.pyplot(fig)
                     st.markdown(get_image_download_link(fig, "scatterplot.png", "questo scatterplot"), unsafe_allow_html=True)
 
-        else:  # Statistiche descrittive
+        elif analysis_type == 'Statistiche descrittive':
             st.subheader('Statistiche descrittive')
+            stats_desc = filtered_df[feature_columns].describe()
+            st.dataframe(stats_desc)
 
-            # Selezione delle variabili
-            stat_features = st.multiselect(
-                'Seleziona le variabili da analizzare',
-                feature_columns,
-                default=hydro_features
-            )
+elif page == 'Addestramento Modello':
+    st.header('Addestramento Modello')
+    st.write('In questa sezione puoi addestrare un nuovo modello con i tuoi dati.')
 
-            if stat_features:
-                # Statistiche descrittive
-                stats_df = filtered_df[stat_features].describe().T
-                st.dataframe(stats_df.round(3))
+    # **1. Caricamento dei dati di addestramento**
+    st.subheader('Carica i dati di addestramento')
+    training_data_file = st.file_uploader('File CSV per l\'addestramento', type=['csv'])
 
-                # Download statistiche
-                st.markdown(get_table_download_link(stats_df.reset_index().rename(columns={'index': 'Sensore'})), unsafe_allow_html=True)
+    if training_data_file is not None:
+        try:
+            train_df = pd.read_csv(training_data_file, sep=';', parse_dates=['Data e Ora'])
+            st.success(f'Dati di addestramento caricati: {len(train_df)} righe')
 
-                # Boxplot
-                fig, ax = plt.subplots(figsize=(12, 6))
-                filtered_df[stat_features].boxplot(ax=ax)
-                plt.title('Boxplot delle variabili selezionate')
-                plt.xticks(rotation=90)
-                plt.tight_layout()
+            # Mostra le prime righe dei dati caricati
+            st.dataframe(train_df.head())
 
-                st.pyplot(fig)
-                st.markdown(get_image_download_link(fig, "boxplot.png", "questo boxplot"), unsafe_allow_html=True)
-    else:
-        st.warning('Nessun dato disponibile nel periodo selezionato')
+            # **2. Configurazione parametri modello**
+            st.subheader('Configura i parametri del modello')
 
-# Footer della dashboard
-st.sidebar.markdown('---')
-st.sidebar.info('Dashboard per modello predittivo idrologico')
+            col1, col2 = st.columns(2)
+            with col1:
+                train_input_window = st.number_input('Input Window', min_value=1, value=INPUT_WINDOW, step=1, help='Numero di timestep di input')
+                train_output_window = st.number_input('Output Window', min_value=1, value=OUTPUT_WINDOW, step=1, help='Numero di timestep di output')
+                train_hidden_size = st.number_input('Hidden Size LSTM', min_value=32, value=128, step=32, help='Dimensione dello stato nascosto LSTM')
+                train_num_layers = st.number_input('Numero di Layers LSTM', min_value=1, value=2, step=1, help='Numero di livelli LSTM')
+            with col2:
+                train_learning_rate = st.number_input('Learning Rate', min_value=0.0001, value=0.001, step=0.0001, format="%.4f", help='Tasso di apprendimento')
+                train_batch_size = st.number_input('Batch Size', min_value=16, value=32, step=16, help='Dimensione del batch')
+                train_epochs = st.number_input('Numero di Epoche', min_value=10, value=100, step=10, help='Numero di epoche di addestramento')
+                validation_split = st.slider('Validation Split (%)', min_value=10, max_value=50, value=20, step=5, help='Percentuale di dati per la validazione')
+
+            # **3. Esecuzione Addestramento**
+            if st.button('Avvia Addestramento'):
+                with st.spinner('Addestramento del modello in corso...'):
+                    try:
+                        # Preparazione dati
+                        train_features_df = train_df[feature_columns].copy()
+
+                        # Scalers
+                        scaler_train_features = MinMaxScaler()
+                        scaler_train_targets = MinMaxScaler()
+
+                        train_features_scaled = scaler_train_features.fit_transform(train_features_df[feature_columns])
+                        train_targets_scaled = scaler_train_targets.fit_transform(train_df[hydro_features])
+
+                        train_scaled_df = pd.DataFrame(train_features_scaled, columns=feature_columns)
+                        for i, hydro_feature in enumerate(hydro_features):
+                            train_scaled_df[hydro_feature] = train_targets_scaled[:,i]
+                        train_scaled_df['Data e Ora'] = train_df['Data e Ora'].values # Mantieni la colonna Data e Ora per comodità se serve
+
+                        X, y = prepare_training_data(train_scaled_df, feature_columns, hydro_features, train_input_window, train_output_window)
+
+                        # Split training/validation
+                        X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=validation_split/100, shuffle=False)
+
+                        input_size = X_train.shape[2]
+                        output_size = y_train.shape[2]
+
+                        # Addestramento modello
+                        trained_model, train_losses, val_losses = train_model(
+                            X_train, y_train, X_val, y_val,
+                            input_size, output_size, train_output_window,
+                            train_hidden_size, train_num_layers,
+                            train_learning_rate, train_batch_size,
+                            train_epochs, device
+                        )
+
+                        st.success('Modello addestrato con successo!')
+
+                        # **4. Visualizzazione Loss**
+                        st.subheader('Loss di Addestramento e Validazione')
+                        fig_loss, ax_loss = plt.subplots()
+                        ax_loss.plot(train_losses, label='Train Loss')
+                        ax_loss.plot(val_losses, label='Validation Loss')
+                        ax_loss.set_xlabel('Epoca')
+                        ax_loss.set_ylabel('Loss (MSE)')
+                        ax_loss.set_title('Andamento della Loss durante l\'addestramento')
+                        ax_loss.legend()
+                        st.pyplot(fig_loss)
+
+                        # **5. Salvataggio Modello e Scaler**
+                        st.subheader('Salva Modello e Scaler')
+
+                        # Salva modello
+                        model_save_path = 'trained_hydro_model.pth'
+                        torch.save(trained_model.state_dict(), model_save_path)
+
+                        # Salva scalers
+                        scaler_features_save_path = 'trained_scaler_features.joblib'
+                        scaler_targets_save_path = 'trained_scaler_targets.joblib'
+                        joblib.dump(scaler_train_features, scaler_features_save_path)
+                        joblib.dump(scaler_train_targets, scaler_targets_save_path)
+
+                        st.markdown(get_binary_file_downloader_html(model_save_path, 'Scarica Modello Addestrato (.pth)'), unsafe_allow_html=True)
+                        st.markdown(get_binary_file_downloader_html(scaler_features_save_path, 'Scarica Scaler Features (.joblib)'), unsafe_allow_html=True)
+                        st.markdown(get_binary_file_downloader_html(scaler_targets_save_path, 'Scarica Scaler Targets (.joblib)'), unsafe_allow_html=True)
+
+
+                    except Exception as e:
+                        st.error(f'Errore durante l\'addestramento: {e}')
+
+        except Exception as e:
+            st.error(f'Errore nel caricamento dei dati di addestramento: {e}')
