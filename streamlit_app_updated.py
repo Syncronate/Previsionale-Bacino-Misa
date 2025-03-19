@@ -3,7 +3,7 @@ import torch
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import seaborn as sns # Make sure seaborn is installed: pip install seaborn
+import seaborn as sns  # Make sure seaborn is installed: pip install seaborn
 import torch.nn as nn
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.model_selection import train_test_split
@@ -11,7 +11,7 @@ import os
 import io
 import base64
 from datetime import datetime, timedelta
-import joblib # Import joblib for saving scalers
+import joblib  # Import joblib for saving scalers
 
 # Ripristino delle classi e funzioni dal modello originale
 class HydroLSTM(nn.Module):
@@ -291,7 +291,7 @@ OUTPUT_WINDOW = 12  # 12 ore di previsione
 
 # Caricamento dei dati storici
 try:
-    df = pd.read_csv(DATA_PATH, sep=';', parse_dates=['Data e Ora'])
+    df = pd.read_csv(DATA_PATH, sep=';', parse_dates=['Data e Ora'], decimal=',') # Added decimal=','
     st.sidebar.success(f'Dati caricati: {len(df)} righe')
 except Exception as e:
     st.error(f'Errore nel caricamento dei dati: {e}')
@@ -335,7 +335,7 @@ else:
     if st.sidebar.button("Addestra Modello"):
         with st.spinner('Addestramento modello in corso...'):
             try:
-                model = train_model(df, feature_columns, hydro_features, INPUT_WINDOW, OUTPUT_WINDOW, MODEL_PATH, SCALER_FEATURES_PATH, SCALER_TARGETS_PATH)
+                model = train_model(df.copy(), feature_columns, hydro_features, INPUT_WINDOW, OUTPUT_WINDOW, MODEL_PATH, SCALER_FEATURES_PATH, SCALER_TARGETS_PATH) # Pass a copy of df
                 scaler_features, scaler_targets = load_scalers(SCALER_FEATURES_PATH, SCALER_TARGETS_PATH) # Reload scalers after training
                 model, device = load_model(MODEL_PATH, len(feature_columns), len(hydro_features), OUTPUT_WINDOW) # Reload model after training
                 st.sidebar.success('Modello addestrato e caricato con successo!')
