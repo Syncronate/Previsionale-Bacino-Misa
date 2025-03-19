@@ -15,23 +15,32 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 import matplotlib.pyplot as plt
 
-# Nomi colonne e sensori (devono corrispondere allo script di training)
+# Nomi colonne e sensori - **AGGIORNATO**
 feature_columns = [
-    'cumulata_pioggia_sensore_1295', 'cumulata_pioggia_sensore_2637', 'cumulata_pioggia_sensore_2858', 'cumulata_pioggia_sensore_2964',
-    'umidita_sensore_3452',
-    'livello_idrometrico_sensore_1008', 'livello_idrometrico_sensore_1112', 'livello_idrometrico_sensore_1283',
-    'livello_idrometrico_sensore_3072', 'livello_idrometrico_sensore_3405'
+    'cumulata_sensore_1295_arcevia',
+    'cumulata_sensore_2637_bettolelle',
+    'cumulata_sensore_2858_barbara',
+    'cumulata_sensore_2964_corinaldo',
+    'umidita_sensore_3452_montemurello',
+    'livello_idrometrico_sensore_1008_serra_dei_conti',
+    'livello_idrometrico_sensore_1112_bettolelle',
+    'livello_idrometrico_sensore_1283_corinaldo_nevola',
+    'livello_idrometrico_sensore_3072_pianello_di_ostra',
+    'livello_idrometrico_sensore_3405_ponte_garibaldi'
 ]
 target_sensors = [
-    'livello_idrometrico_sensore_1008', 'livello_idrometrico_sensore_1112', 'livello_idrometrico_sensore_1283',
-    'livello_idrometrico_sensore_3072', 'livello_idrometrico_sensore_3405'
+    'livello_idrometrico_sensore_1008_serra_dei_conti',
+    'livello_idrometrico_sensore_1112_bettolelle',
+    'livello_idrometrico_sensore_1283_corinaldo_nevola',
+    'livello_idrometrico_sensore_3072_pianello_di_ostra',
+    'livello_idrometrico_sensore_3405_ponte_garibaldi'
 ]
-sensor_names_mapping = { # Mappa nomi colonna -> nomi visualizzazione
-    'livello_idrometrico_sensore_1008': 'Sensore 1008 (Serra dei Conti)',
-    'livello_idrometrico_sensore_1112': 'Sensore 1112 (Bettolelle)',
-    'livello_idrometrico_sensore_1283': 'Sensore 1283 (Corinaldo/Nevola)',
-    'livello_idrometrico_sensore_3072': 'Sensore 3072 (Pianello di Ostra)',
-    'livello_idrometrico_sensore_3405': 'Sensore 3405 (Pianello di Ostra)'
+sensor_names_mapping = { # Mappa nomi colonna -> nomi visualizzazione - **AGGIORNATO**
+    'livello_idrometrico_sensore_1008_serra_dei_conti': 'Sensore 1008 (Serra dei Conti)',
+    'livello_idrometrico_sensore_1112_bettolelle': 'Sensore 1112 (Bettolelle)',
+    'livello_idrometrico_sensore_1283_corinaldo_nevola': 'Sensore 1283 (Corinaldo/Nevola)',
+    'livello_idrometrico_sensore_3072_pianello_di_ostra': 'Sensore 3072 (Pianello di Ostra)',
+    'livello_idrometrico_sensore_3405_ponte_garibaldi': 'Sensore 3405 (Ponte Garibaldi)'
 }
 
 input_window = 48 # Deve corrispondere allo script di training
@@ -47,19 +56,20 @@ def data_entry_form(df, file_path="dataset_idrologico.csv"):
 
     next_event_id = get_next_event_id(df)
 
-    fields_info = {
+    fields_info = { # **AGGIORNATO - Nomi campi e label**
         "data": {"label": "Data Evento", "type": "date", "default": datetime.now(), "streamlit_type": st.date_input},
+        "ora": {"label": "Ora Evento", "type": "text", "default": "00:00", "streamlit_type": st.text_input, "kwargs": {"placeholder": "HH:MM"}}, # Campo per l'ora
         "evento": {"label": "ID Evento", "type": "int", "default": next_event_id, "streamlit_type": st.number_input, "kwargs": {"format": "%d", "disabled": True}},
-        "saturazione_terreno": {"label": "Saturazione Terreno (%)", "type": "float", "default": 35.0, "streamlit_type": st.number_input, "kwargs": {"format": "%.2f"}},
-        "ore_pioggia_totali": {"label": "Ore pioggia totali", "type": "float", "default": 0.0, "streamlit_type": st.number_input, "kwargs": {"format": "%.2f"}},
-        "cumulata_totale": {"label": "Cumulata Totale (mm)", "type": "float", "default": 0.0, "streamlit_type": st.number_input, "kwargs": {"format": "%.2f"}},
-        "pioggia_gg_precedenti": {"label": "Pioggia gg Precedenti (mm)", "type": "float", "default": 0.0, "streamlit_type": st.number_input, "kwargs": {"format": "%.2f"}},
-        "intensità_media": {"label": "Intensità Media (mm/h)", "type": "float", "default": 0.0, "streamlit_type": st.number_input, "kwargs": {"format": "%.2f"}},
-        "idrometria_1008_inizio": {"label": "Idrometria 1008 Inizio (m)", "type": "float", "default": 0.5, "streamlit_type": st.number_input, "kwargs": {"format": "%.2f"}},
-        "idrometria_1112_inizio": {"label": "Idrometria 1112 Inizio (m)", "type": "float", "default": 0.8, "streamlit_type": st.number_input, "kwargs": {"format": "%.2f"}},
-        "idrometria_1112_max": {"label": "Idrometria 1112 Max (m)", "type": "float", "default": 0.8, "streamlit_type": st.number_input, "kwargs": {"format": "%.2f"}},
-        "idrometria_1283_inizio": {"label": "Idrometria 1283 Inizio (m)", "type": "float", "default": 1.2, "streamlit_type": st.number_input, "kwargs": {"format": "%.2f"}},
-        "idrometria_3072_inizio": {"label": "Idrometria 3072 Inizio (m)", "type": "float", "default": 0.7, "streamlit_type": st.number_input, "kwargs": {"format": "%.2f"}}
+        "cumulata_sensore_1295_arcevia": {"label": "Cumulata Sensore 1295 (Arcevia)", "type": "float", "default": 0.0, "streamlit_type": st.number_input, "kwargs": {"format": "%.2f"}},
+        "cumulata_sensore_2637_bettolelle": {"label": "Cumulata Sensore 2637 (Bettolelle)", "type": "float", "default": 0.0, "streamlit_type": st.number_input, "kwargs": {"format": "%.2f"}},
+        "cumulata_sensore_2858_barbara": {"label": "Cumulata Sensore 2858 (Barbara)", "type": "float", "default": 0.0, "streamlit_type": st.number_input, "kwargs": {"format": "%.2f"}},
+        "cumulata_sensore_2964_corinaldo": {"label": "Cumulata Sensore 2964 (Corinaldo)", "type": "float", "default": 0.0, "streamlit_type": st.number_input, "kwargs": {"format": "%.2f"}},
+        "umidita_sensore_3452_montemurello": {"label": "Umidità Sensore 3452 (Montemurello)", "type": "float", "default": 70.0, "streamlit_type": st.number_input, "kwargs": {"format": "%.2f"}},
+        "livello_idrometrico_sensore_1008_serra_dei_conti": {"label": "Livello Idrometrico 1008 (Serra dei Conti)", "type": "float", "default": 0.5, "streamlit_type": st.number_input, "kwargs": {"format": "%.2f"}},
+        "livello_idrometrico_sensore_1112_bettolelle": {"label": "Livello Idrometrico 1112 (Bettolelle)", "type": "float", "default": 0.8, "streamlit_type": st.number_input, "kwargs": {"format": "%.2f"}},
+        "livello_idrometrico_sensore_1283_corinaldo_nevola": {"label": "Livello Idrometrico 1283 (Corinaldo/Nevola)", "type": "float", "default": 1.2, "streamlit_type": st.number_input, "kwargs": {"format": "%.2f"}},
+        "livello_idrometrico_sensore_3072_pianello_di_ostra": {"label": "Livello Idrometrico 3072 (Pianello di Ostra)", "type": "float", "default": 0.7, "streamlit_type": st.number_input, "kwargs": {"format": "%.2f"}},
+        "livello_idrometrico_sensore_3405_ponte_garibaldi": {"label": "Livello Idrometrico 3405 (Ponte Garibaldi)", "type": "float", "default": 0.7, "streamlit_type": st.number_input, "kwargs": {"format": "%.2f"}}
     }
 
     input_values = {}
@@ -111,7 +121,9 @@ def validate_inputs(input_values, fields_info):
             elif field_info["type"] == "float":
                 valid_data[field_name] = float(value)
             elif field_info["type"] == "date": # Handle date type
-                valid_data[field_name] = value.strftime('%Y-%m-%d') # Format date to string YYYY-MM-DD
+                valid_data['data'] = value.strftime('%Y-%m-%d') # Format date to string YYYY-MM-DD
+            elif field_info["type"] == "text": # Handle time type
+                valid_data['ora'] = value # Keep time as string
             else:
                 valid_data[field_name] = value
         except ValueError:
@@ -152,13 +164,14 @@ def view_dataset_streamlit(df):
             df.tail(10),
             column_config={
                 "evento": st.column_config.NumberColumn(format="%d"),
-                "idrometria_1112_max": st.column_config.NumberColumn(
-                    "Idrometria 1112 Max (m)",
+                "livello_idrometrico_sensore_1112_bettolelle": st.column_config.NumberColumn( # **AGGIORNATO - Nome colonna**
+                    "Livello Idrometrico 1112 (Bettolelle) (m)",
                     help="Valore massimo registrato",
                     format="%.2f",
                     step=0.01
                 ),
-                "data": st.column_config.DateColumn("Data Evento", format="YYYY-MM-DD") # Display Data column as Date
+                "data": st.column_config.DateColumn("Data Evento", format="YYYY-MM-DD"), # Display Data column as Date
+                "ora": st.column_config.TextColumn("Ora Evento") # Display Ora column as Text - **NUOVO**
             },
             use_container_width=True,
             hide_index=True
@@ -170,10 +183,11 @@ def view_dataset_streamlit(df):
             col1, col2 = st.columns(2)
             with col1:
                 st.metric("Numero totale eventi", len(df))
-                st.metric("Idrometria 1112 Max Media", f"{df['idrometria_1112_max'].mean():.2f} m")
+                st.metric("Livello Idrometrico 1112 Max Medio", f"{df['livello_idrometrico_sensore_1112_bettolelle'].mean():.2f} m") # **AGGIORNATO - Nome colonna**
             with col2:
-                st.metric("Cumulata totale media", f"{df['cumulata_totale'].mean():.2f} mm")
-                st.metric("Intensità media", f"{df['intensità_media'].mean():.2f} mm/h")
+                # Le statistiche sulla cumulata totale e intensità media non sono più direttamente applicabili qui
+                # Puoi adattare queste metriche se hai nuove colonne pertinenti per le statistiche
+                pass # Rimozione metriche non pertinenti
     else:
         st.info("Dataset vuoto.")
     st.session_state['dataset_view'] = True # Set flag to show dataset view
@@ -199,7 +213,7 @@ def prepare_initial_dataset(output_file="dataset_idrologico.csv"):
             return pd.DataFrame() # Restituisci DataFrame vuoto in caso di errore
     else:
         st.info(f"File {output_file} non trovato. Inizializzando un dataset vuoto.")
-        return pd.DataFrame(columns=['data', 'evento', 'saturazione_terreno', 'ore_pioggia_totali', 'cumulata_totale', 'pioggia_gg_precedenti', 'intensità_media', 'idrometria_1008_inizio', 'idrometria_1112_inizio', 'idrometria_1112_max', 'idrometria_1283_inizio', 'idrometria_3072_inizio']) # Return empty DataFrame with columns including 'data'
+        return pd.DataFrame(columns=['data', 'ora', 'evento', 'cumulata_sensore_1295_arcevia', 'cumulata_sensore_2637_bettolelle', 'cumulata_sensore_2858_barbara', 'cumulata_sensore_2964_corinaldo', 'umidita_sensore_3452_montemurello', 'livello_idrometrico_sensore_1008_serra_dei_conti', 'livello_idrometrico_sensore_1112_bettolelle', 'livello_idrometrico_sensore_1283_corinaldo_nevola', 'livello_idrometrico_sensore_3072_pianello_di_ostra', 'livello_idrometrico_sensore_3405_ponte_garibaldi']) # Return empty DataFrame with columns including 'data'
 
 ####################################################PARTE 2: SIMULAZIONE - Maschera per inserimento dati di simulazione (Streamlit)####################################################
 def simulation_data_entry_form(feature_defaults, on_submit):
@@ -255,17 +269,17 @@ def multiple_simulations_interface(model, scaler, features_cols, df):
     """Streamlit interface to run multiple simulations with LSTM model."""
     st.header("Simulazioni Multiple - Modello LSTM Addestrato")
 
-    sim_defaults = {
-        "cumulata_pioggia_sensore_1295": 0.0,
-        "cumulata_pioggia_sensore_2637": 0.0,
-        "cumulata_pioggia_sensore_2858": 0.0,
-        "cumulata_pioggia_sensore_2964": 0.0,
-        "umidita_sensore_3452": 70.0,
-        "livello_idrometrico_sensore_1008": 0.54,
-        "livello_idrometrico_sensore_1112": 1.18,
-        "livello_idrometrico_sensore_1283": 1.18,
-        "livello_idrometrico_sensore_3072": 0.89,
-        "livello_idrometrico_sensore_3405": 0.70,
+    sim_defaults = { # **AGGIORNATO - Nomi colonne e valori di default**
+        'cumulata_sensore_1295_arcevia': 0.0,
+        'cumulata_sensore_2637_bettolelle': 0.0,
+        'cumulata_sensore_2858_barbara': 0.0,
+        'cumulata_sensore_2964_corinaldo': 0.0,
+        'umidita_sensore_3452_montemurello': 70.0,
+        'livello_idrometrico_sensore_1008_serra_dei_conti': 0.54,
+        'livello_idrometrico_sensore_1112_bettolelle': 1.18,
+        'livello_idrometrico_sensore_1283_corinaldo_nevola': 1.18,
+        'livello_idrometrico_sensore_3072_pianello_di_ostra': 0.89,
+        'livello_idrometrico_sensore_3405_ponte_garibaldi': 0.70,
     }
     input_feature_names = list(sim_defaults.keys()) # Ordine deve corrispondere a feature_columns
 
@@ -279,6 +293,7 @@ def multiple_simulations_interface(model, scaler, features_cols, df):
             for field in input_feature_names: # Usa input_feature_names per l'ordine corretto
                 input_values[field] = st.number_input(
                     field,
+                    label=field.replace('_', ' ').title(), # Label più leggibile
                     value=sim_defaults[field],
                     format="%.2f",
                     step=0.01,
@@ -399,7 +414,7 @@ def visualizza_previsione_plotly_lstm(previsioni, target_sensors, sensor_names_m
 if __name__ == "__main__":
     st.title("Dashboard Idrologico - LSTM")
 
-    # Inizializza session state
+    # Inizializza session state (rimane invariato)
     if 'dataset' not in st.session_state:
         st.session_state['dataset'] = prepare_initial_dataset()
     if 'dataset_view' not in st.session_state:
@@ -424,14 +439,14 @@ if __name__ == "__main__":
     dataset_csv = "dataset_idrologico.csv"
     df = st.session_state['dataset']
 
-    # PARTE 1: Data Entry Form
+    # PARTE 1: Data Entry Form (rimane invariata, ma usa nuovi nomi colonne)
     with st.expander("Inserimento Dati", expanded=False):
         data_entry_form(df, file_path=dataset_csv)
     df = pd.read_csv(dataset_csv, sep='\t', dtype=str) # Ricarica dataset dopo salvataggio
     df.columns = df.columns.str.strip().str.lower().str.replace(' ', '_')
 
     for col in df.columns:
-        if col != 'evento' and col != 'data':
+        if col != 'evento' and col != 'data' and col != 'ora': # Exclude 'ora' too
             df[col] = df[col].str.replace(',', '.', regex=False).astype(float)
     df['evento'] = df['evento'].astype(int)
     if 'data' in df.columns:
@@ -441,10 +456,10 @@ if __name__ == "__main__":
             st.warning("Impossibile convertire colonna 'data' in formato data.")
     st.session_state['dataset'] = df
 
-    # Carica modello e scaler addestrati
+    # Carica modello e scaler addestrati (rimane invariata)
     model_lstm, scaler_lstm = carica_modello_e_scaler()
 
-    # PARTE 4: Interfaccia Simulazioni Multiple (LSTM)
+    # PARTE 4: Interfaccia Simulazioni Multiple (LSTM) (rimane invariata, ma usa nuovi nomi colonne)
     with st.expander("Simulazioni Multiple LSTM", expanded=True):
         if model_lstm and scaler_lstm:
             multiple_simulations_interface(model_lstm, scaler_lstm, feature_columns, df)
