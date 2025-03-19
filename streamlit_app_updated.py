@@ -60,6 +60,17 @@ def prepare_data(data_path, input_window=INPUT_WINDOW, output_window=OUTPUT_WIND
 
     feature_columns = rain_features + humidity_feature + hydro_features
 
+    st.write("Tipi di dati iniziali delle colonne:")
+    st.write(df[feature_columns].dtypes)
+
+    # Conversione forzata a numerico e gestione degli errori
+    for col in feature_columns:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+
+    st.write("Tipi di dati dopo la conversione a numerico:")
+    st.write(df[feature_columns].dtypes)
+
+    # Riempimento dei valori mancanti con la media
     df[feature_columns] = df[feature_columns].fillna(df[feature_columns].mean())
 
     scaler_features = MinMaxScaler()
