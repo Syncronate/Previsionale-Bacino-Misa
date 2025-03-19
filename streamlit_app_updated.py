@@ -178,9 +178,16 @@ def train_model(train_loader, val_loader, input_size, output_size, output_window
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
+            print(f"Best validation loss improved, saving model to: best_hydro_model.pth, current working directory: {os.getcwd()}") # Debug print
             torch.save(model.state_dict(), 'best_hydro_model.pth')
 
-    model.load_state_dict(torch.load('best_hydro_model.pth'))
+    print(f"Training finished, current working directory before loading: {os.getcwd()}") # Debug print
+    if os.path.exists('best_hydro_model.pth'): # Check if file exists before loading
+        print("best_hydro_model.pth file found, loading model state.")
+        model.load_state_dict(torch.load('best_hydro_model.pth', map_location=device))
+    else:
+        print("best_hydro_model.pth file NOT FOUND in current directory.") # Debug print
+        st.error("Modello non trovato dopo l'addestramento! Controlla i log.") # Streamlit error message
     status_text.success("Training completato!")
     return model, train_losses, val_losses
 
