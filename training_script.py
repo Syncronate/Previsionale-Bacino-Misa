@@ -1,14 +1,48 @@
 import pandas as pd
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.model_selection import train_test_split
-from torch.utils.data import DataLoader, TensorDataset
-import numpy as np
 import os
+import matplotlib.pyplot as plt
 
-# Definisci il modello LSTM
+# Definisci i nomi delle colonne e dei sensori
+feature_columns = [
+    'cumulata_pioggia_sensore_1295', 'cumulata_pioggia_sensore_2637', 'cumulata_pioggia_sensore_2858', 'cumulata_pioggia_sensore_2964',
+    'umidita_sensore_3452',
+    'livello_idrometrico_sensore_1008', 'livello_idrometrico_sensore_1112', 'livello_idrometrico_sensore_1283',
+    'livello_idrometrico_sensore_3072', 'livello_idrometrico_sensore_3405'
+]
+target_sensors = [
+    'livello_idrometrico_sensore_1008', 'livello_idrometrico_sensore_1112', 'livello_idrometrico_sensore_1283',
+    'livello_idrometrico_sensore_3072', 'livello_idrometrico_sensore_3405'
+]
+
+# Parametri per la creazione delle sequenze
+input_window = 48 # 24 ore a intervalli di 30 minuti
+output_horizon = 24 # 12 ore a intervalli di 30 minuti
+num_sensors_out = len(target_sensors)
+num_features_in = len(feature_columns)
+
+# Funzione per preparare le sequenze di input e target
+def create_sequences(data, input_window, output_horizon, target_sensors, feature_columns):
+    X, y = [], []
+    num_samples = len(data) - input_window - output_horizon + 1
+    target_sensor_indices = [data.columns.get_loc(sensor) for sensor in target_sensors]
+    feature_indices = [data.columns.get_loc(feature) for feature in feature_columns]
+
+    for i in range(num_samples):
+        input_seq = data.iloc[i:i+input_window, feature_indices].values
+        target_seq = data.iloc[i+input_window:i+input_window+output_horizon, target_sensor_indices].values
+        if len(target_seq) == output_horizon: # Assicurati che ci siano abbastanza dati per la finestra target
+            X.append(input_seq)
+            y.append(target_seq)
+    return np.array(X), np.array(y)
+
+
+# Definizione del modello LSTM
 class HydrologicalLSTM(nn.Module):
     def __init__(self, input_size, hidden_size, num_layers, output_size):
         super(HydrologicalLSTM, self).__init__()
@@ -18,51 +52,117 @@ class HydrologicalLSTM(nn.Module):
         self.fc = nn.Linear(hidden_size, output_size)
 
     def forward(self, x):
-        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
-        c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
-        out, _ = self.lstm(x, (h0, c0))
-        # Prendi solo l'output dell'ultimo timestep per la previsione multi-step
-        out = self.fc(out[:, -1, :])
-        return out
+        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device) # Inizializza hidden state
+        c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device) # Inizializza cell state
+        out, _ = self.lstm(x, (h0, c0)) # out: tensor di shape (batch_size, seq_length, hidden_size)
+        # Prendi solo l'output all'ultimo timestep per la previsione sequenziale
+        out = self.fc(out[:, -1, :]) # Prendi l'ultimo timestep e applica fully connected layer
+        return out.view(x.size(0), output_horizon, num_sensors_out) # Reshape per multi-output multi-step
 
-# Funzioni per la preparazione dei dati in sequenze
-def create_sequences(input_data, output_data, seq_length_in, seq_length_out):
-    Xs, ys = [], []
-    for i in range(len(input_data) - seq_length_in - seq_length_out + 1):
-        Xs.append(input_data[i:(i + seq_length_in)])
-        ys.append(output_data[(i + seq_length_in):(i + seq_length_in + seq_length_out)])
-    return np.array(Xs), np.array(ys)
 
-def prepare_data(csv_path, input_cols, output_cols, seq_length_in, seq_length_out, test_size=0.2, validation_size=0.2):
-    df = pd.read_csv(csv_path, sep='\t')
+def train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs, device):
+    history = {'train_loss': [], 'val_loss': []}
+    best_val_loss = float('inf')
+    patience = 10  # Numero di epoche di patience per l'early stopping
+    epochs_no_improve = 0
 
-    # Conversione delle colonne al tipo corretto e gestione degli errori
-    for col in df.columns:
-        if col != 'data': # Mantieni la colonna 'data' come stringa per ora
-            try:
-                df[col] = pd.to_numeric(df[col].str.replace(',', '.'), errors='coerce')
-            except AttributeError: # Gestisci il caso in cui la colonna è già numerica
-                pass
+    for epoch in range(num_epochs):
+        model.train()
+        train_loss = 0
+        for batch_X, batch_y in train_loader:
+            batch_X, batch_y = batch_X.to(device), batch_y.to(device)
+            optimizer.zero_grad()
+            outputs = model(batch_X)
+            loss = criterion(outputs, batch_y)
+            loss.backward()
+            optimizer.step()
+            train_loss += loss.item()
 
-    df = df.dropna() # Gestione dei valori mancanti: rimozione righe con NaN
+        avg_train_loss = train_loss / len(train_loader)
+        history['train_loss'].append(avg_train_loss)
 
-    input_data = df[input_cols].values
-    output_data = df[output_cols].values
+        model.eval()
+        val_loss = 0
+        with torch.no_grad():
+            for batch_X, batch_y in val_loader:
+                batch_X, batch_y = batch_X.to(device), batch_y.to(device)
+                outputs = model(batch_X)
+                loss = criterion(outputs, batch_y)
+                val_loss += loss.item()
+        avg_val_loss = val_loss / len(val_loader)
+        history['val_loss'].append(avg_val_loss)
 
-    # Normalizzazione Min-Max Scaler per input e output separatamente
-    input_scaler = MinMaxScaler()
-    output_scaler = MinMaxScaler()
+        print(f'Epoch [{epoch+1}/{num_epochs}], Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}')
 
-    input_scaled = input_scaler.fit_transform(input_data)
-    output_scaled = output_scaler.fit_transform(output_data)
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            epochs_no_improve = 0
+            torch.save(model.state_dict(), 'best_model.pth') # Salva il modello migliore
+        else:
+            epochs_no_improve += 1
 
-    X, y = create_sequences(input_scaled, output_scaled, seq_length_in, seq_length_out)
+        if epochs_no_improve == patience:
+            print(f'Early stopping triggered after epoch {epoch+1}!')
+            break
+
+    model.load_state_dict(torch.load('best_model.pth')) # Carica i pesi del modello migliore
+    return history, model
+
+
+def evaluate_model(model, test_loader, criterion, device):
+    model.eval()
+    test_loss = 0
+    predictions = []
+    actuals = []
+    with torch.no_grad():
+        for batch_X, batch_y in test_loader:
+            batch_X, batch_y = batch_X.to(device), batch_y.to(device)
+            outputs = model(batch_X)
+            loss = criterion(outputs, batch_y)
+            test_loss += loss.item()
+            predictions.extend(outputs.cpu().numpy())
+            actuals.extend(batch_y.cpu().numpy())
+
+    avg_test_loss = test_loss / len(test_loader)
+    return avg_test_loss, np.array(predictions), np.array(actuals)
+
+
+def plot_loss_curve(history):
+    plt.figure(figsize=(10, 6))
+    plt.plot(history['train_loss'], label='Training Loss')
+    plt.plot(history['val_loss'], label='Validation Loss')
+    plt.title('Loss Curve')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+    plt.grid(True)
+    plt.savefig('loss_curve.png')  # Salva il grafico come immagine
+    plt.show()
+
+
+if __name__ == '__main__':
+    # Caricamento dati
+    data = pd.read_csv('dataset_idrologico_timeseries.csv', sep='\t', parse_dates=['timestamp'])
+    data = data.sort_values(by='timestamp') # Assicura che i dati siano ordinati temporalmente
+    data = data.drop(columns=['timestamp']) # Rimuovi la colonna timestamp dopo l'ordinamento, se necessario
+
+    # Gestione valori mancanti (imputazione semplice con la media)
+    for col in data.columns:
+        if data[col].isnull().any():
+            data[col] = data[col].fillna(data[col].mean())
+
+    # Normalizzazione dei dati
+    scaler = MinMaxScaler()
+    scaled_data = scaler.fit_transform(data)
+    scaled_data = pd.DataFrame(scaled_data, columns=data.columns)
+
+    X, y = create_sequences(scaled_data, input_window, output_horizon, target_sensors, feature_columns)
 
     # Divisione in training, validation e test set
-    X_train, X_temp, y_train, y_temp = train_test_split(X, y, test_size=test_size, random_state=42, shuffle=False)
-    X_val, X_test, y_val, y_test = train_test_split(X_temp, y_temp, test_size=0.5, random_state=42, shuffle=False) # validation_size = test_size = 0.2 of original data
+    X_train, X_temp, y_train, y_temp = train_test_split(X, y, test_size=0.3, random_state=42, shuffle=False) # shuffle=False per dati time-series
+    X_val, X_test, y_val, y_test = train_test_split(X_temp, y_temp, test_size=0.5, random_state=42, shuffle=False) # shuffle=False per dati time-series
 
-    # Conversione in tensori PyTorch
+    # Conversione in tensori PyTorch e creazione DataLoader
     X_train_tensor = torch.tensor(X_train, dtype=torch.float32)
     y_train_tensor = torch.tensor(y_train, dtype=torch.float32)
     X_val_tensor = torch.tensor(X_val, dtype=torch.float32)
@@ -70,97 +170,38 @@ def prepare_data(csv_path, input_cols, output_cols, seq_length_in, seq_length_ou
     X_test_tensor = torch.tensor(X_test, dtype=torch.float32)
     y_test_tensor = torch.tensor(y_test, dtype=torch.float32)
 
-    return X_train_tensor, y_train_tensor, X_val_tensor, y_val_tensor, X_test_tensor, y_test_tensor, input_scaler, output_scaler
+    train_dataset = torch.utils.data.TensorDataset(X_train_tensor, y_train_tensor)
+    val_dataset = torch.utils.data.TensorDataset(X_val_tensor, y_val_tensor)
+    test_dataset = torch.utils.data.TensorDataset(X_test_tensor, y_test_tensor)
 
+    batch_size = 32
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=False) # shuffle=False per dati time-series
+    val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=batch_size, shuffle=False) # shuffle=False per dati time-series
+    test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, shuffle=False) # shuffle=False per dati time-series
 
-def train_model(model, X_train, y_train, X_val, y_val, learning_rate, num_epochs, batch_size=32, patience=10):
-    criterion = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-    train_dataset = TensorDataset(X_train, y_train)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-
-    best_val_loss = float('inf')
-    epochs_no_improve = 0
-
-    for epoch in range(num_epochs):
-        model.train()
-        total_loss = 0
-        for batch_X, batch_y in train_loader:
-            optimizer.zero_grad()
-            outputs = model(batch_X)
-            loss = criterion(outputs, batch_y)
-            loss.backward()
-            optimizer.step()
-            total_loss += loss.item()
-
-        avg_train_loss = total_loss / len(train_loader)
-
-        model.eval()
-        with torch.no_grad():
-            val_outputs = model(X_val)
-            val_loss = criterion(val_outputs, y_val)
-
-        print(f'Epoch [{epoch+1}/{num_epochs}], Train Loss: {avg_train_loss:.4f}, Validation Loss: {val_loss:.4f}')
-
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            epochs_no_improve = 0
-            torch.save(model.state_dict(), 'best_model.pth') # Salva il modello migliore
-        else:
-            epochs_no_improve += 1
-
-        if epochs_no_improve >= patience:
-            print(f'Early stopping triggered after epoch {epoch+1}!')
-            break
-
-    model.load_state_dict(torch.load('best_model.pth')) # Ricarica i pesi del modello migliore
-    return model
-
-
-if __name__ == '__main__':
-    # Parametri
-    csv_path = 'dataset_idrologico.csv'
-    input_cols = [
-        'cumulata_sensore_1295', 'cumulata_sensore_2637', 'cumulata_sensore_2858', 'cumulata_sensore_2964',
-        'umidita_sensore_3452',
-        'livello_idrometrico_sensore_1008', 'livello_idrometrico_sensore_1112', 'livello_idrometrico_sensore_1283',
-        'livello_idrometrico_sensore_3072', 'livello_idrometrico_sensore_3405'
-    ]
-    output_cols = [
-        'livello_idrometrico_sensore_1008', 'livello_idrometrico_sensore_1112', 'livello_idrometrico_sensore_1283',
-        'livello_idrometrico_sensore_3072', 'livello_idrometrico_sensore_3405'
-    ] # Previsione per tutti i sensori
-    sequence_length_in = 24 # 24 ore di dati in input (se dati orari)
-    sequence_length_out = 12 # Previsione per le successive 12 ore
-
-    input_size = len(input_cols)
+    # Inizializzazione modello, loss function e optimizer
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    input_size = X_train_tensor.shape[2] # Numero di features in input
     hidden_size = 64
     num_layers = 2
-    output_size = len(output_cols) # Output per tutti i sensori
-    learning_rate = 0.001
-    num_epochs = 200
-    patience = 10 # Early stopping patience
+    output_size = output_horizon * num_sensors_out # Output per 12 ore per 5 sensori
 
-    # Preparazione dati
-    X_train_tensor, y_train_tensor, X_val_tensor, y_val_tensor, X_test_tensor, y_test_tensor, input_scaler, output_scaler = prepare_data(
-        csv_path, input_cols, output_cols, sequence_length_in, sequence_length_out
-    )
+    model = HydrologicalLSTM(input_size, hidden_size, num_layers, output_size).to(device)
+    criterion = nn.MSELoss()
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    num_epochs = 100
 
-    # Inizializzazione e training del modello
-    model = HydrologicalLSTM(input_size, hidden_size, num_layers, output_size)
-    trained_model = train_model(model, X_train_tensor, y_train_tensor, X_val_tensor, y_val_tensor, learning_rate, num_epochs, patience=patience)
+    # Training del modello
+    history, trained_model = train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs, device)
 
-    # Salvataggio del modello e degli scalers
-    torch.save(trained_model.state_dict(), 'hydrological_model.pth')
-    print('Modello salvato in hydrological_model.pth')
-    torch.save(input_scaler, 'input_scaler.pth')
-    torch.save(output_scaler, 'output_scaler.pth')
-    print('Scalers salvati.')
+    # Valutazione sul test set
+    test_loss, predictions, actuals = evaluate_model(trained_model, test_loader, criterion, device)
+    print(f'Test Loss: {test_loss:.4f}')
 
-    # Valutazione finale sul test set (opzionale)
-    trained_model.eval()
-    with torch.no_grad():
-        test_outputs = trained_model(X_test_tensor)
-        criterion = nn.MSELoss()
-        test_loss = criterion(test_outputs, y_test_tensor)
-        print(f'Loss sul Test Set: {test_loss.item():.4f}')
+    # Plot della loss curve
+    plot_loss_curve(history)
+
+    # Salvataggio del modello e dello scaler
+    torch.save(trained_model.state_dict(), 'hydrological_lstm_model.pth')
+    torch.save(scaler, 'scaler.pkl')
+    print("Modello e scaler salvati con successo!")
