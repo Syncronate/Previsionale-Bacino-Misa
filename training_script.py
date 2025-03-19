@@ -8,25 +8,34 @@ from sklearn.model_selection import train_test_split
 import os
 import matplotlib.pyplot as plt
 
-# Definisci i nomi delle colonne e dei sensori
+# Definisci i nomi delle colonne e dei sensori - **AGGIORNATO**
 feature_columns = [
-    'cumulata_pioggia_sensore_1295', 'cumulata_pioggia_sensore_2637', 'cumulata_pioggia_sensore_2858', 'cumulata_pioggia_sensore_2964',
-    'umidita_sensore_3452',
-    'livello_idrometrico_sensore_1008', 'livello_idrometrico_sensore_1112', 'livello_idrometrico_sensore_1283',
-    'livello_idrometrico_sensore_3072', 'livello_idrometrico_sensore_3405'
+    'cumulata_sensore_1295_arcevia',
+    'cumulata_sensore_2637_bettolelle',
+    'cumulata_sensore_2858_barbara',
+    'cumulata_sensore_2964_corinaldo',
+    'umidita_sensore_3452_montemurello',
+    'livello_idrometrico_sensore_1008_serra_dei_conti',
+    'livello_idrometrico_sensore_1112_bettolelle',
+    'livello_idrometrico_sensore_1283_corinaldo_nevola',
+    'livello_idrometrico_sensore_3072_pianello_di_ostra',
+    'livello_idrometrico_sensore_3405_ponte_garibaldi'
 ]
 target_sensors = [
-    'livello_idrometrico_sensore_1008', 'livello_idrometrico_sensore_1112', 'livello_idrometrico_sensore_1283',
-    'livello_idrometrico_sensore_3072', 'livello_idrometrico_sensore_3405'
+    'livello_idrometrico_sensore_1008_serra_dei_conti',
+    'livello_idrometrico_sensore_1112_bettolelle',
+    'livello_idrometrico_sensore_1283_corinaldo_nevola',
+    'livello_idrometrico_sensore_3072_pianello_di_ostra',
+    'livello_idrometrico_sensore_3405_ponte_garibaldi'
 ]
 
-# Parametri per la creazione delle sequenze
+# Parametri per la creazione delle sequenze (rimangono invariati)
 input_window = 48 # 24 ore a intervalli di 30 minuti
 output_horizon = 24 # 12 ore a intervalli di 30 minuti
 num_sensors_out = len(target_sensors)
 num_features_in = len(feature_columns)
 
-# Funzione per preparare le sequenze di input e target
+# Funzione per preparare le sequenze di input e target (rimane invariata)
 def create_sequences(data, input_window, output_horizon, target_sensors, feature_columns):
     X, y = [], []
     num_samples = len(data) - input_window - output_horizon + 1
@@ -42,7 +51,7 @@ def create_sequences(data, input_window, output_horizon, target_sensors, feature
     return np.array(X), np.array(y)
 
 
-# Definizione del modello LSTM
+# Definizione del modello LSTM (rimane invariata)
 class HydrologicalLSTM(nn.Module):
     def __init__(self, input_size, hidden_size, num_layers, output_size):
         super(HydrologicalLSTM, self).__init__()
@@ -60,6 +69,7 @@ class HydrologicalLSTM(nn.Module):
         return out.view(x.size(0), output_horizon, num_sensors_out) # Reshape per multi-output multi-step
 
 
+# Funzioni di training e valutazione (rimangono invariate)
 def train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs, device):
     history = {'train_loss': [], 'val_loss': []}
     best_val_loss = float('inf')
@@ -127,6 +137,7 @@ def evaluate_model(model, test_loader, criterion, device):
     return avg_test_loss, np.array(predictions), np.array(actuals)
 
 
+# Funzione per il plot della loss curve (rimane invariata)
 def plot_loss_curve(history):
     plt.figure(figsize=(10, 6))
     plt.plot(history['train_loss'], label='Training Loss')
@@ -141,28 +152,44 @@ def plot_loss_curve(history):
 
 
 if __name__ == '__main__':
-    # Caricamento dati
-    data = pd.read_csv('dataset_idrologico_timeseries.csv', sep='\t', parse_dates=['timestamp'])
-    data = data.sort_values(by='timestamp') # Assicura che i dati siano ordinati temporalmente
-    data = data.drop(columns=['timestamp']) # Rimuovi la colonna timestamp dopo l'ordinamento, se necessario
+    # Caricamento dati - **MODIFICATO per gestire Data e Ora e nomi colonne**
+    data = pd.read_csv('dataset_idrologico_timeseries.csv', sep='\t')
+    data['timestamp'] = pd.to_datetime(data['Data'] + ' ' + data['Ora'], format='%d/%m/%Y %H:%M') # Combina Data e Ora in timestamp
+    data = data.sort_values(by='timestamp')
+    data = data.drop(columns=['Data', 'Ora', 'timestamp']) # Rimuovi Data, Ora e timestamp dopo l'ordinamento
 
-    # Gestione valori mancanti (imputazione semplice con la media)
+    # Rinomina colonne per coerenza con feature_columns e target_sensors - **NUOVO**
+    data.columns = [
+        'cumulata_sensore_1295_arcevia',
+        'cumulata_sensore_2637_bettolelle',
+        'cumulata_sensore_2858_barbara',
+        'cumulata_sensore_2964_corinaldo',
+        'umidita_sensore_3452_montemurello',
+        'livello_idrometrico_sensore_1008_serra_dei_conti',
+        'livello_idrometrico_sensore_1112_bettolelle',
+        'livello_idrometrico_sensore_1283_corinaldo_nevola',
+        'livello_idrometrico_sensore_3072_pianello_di_ostra',
+        'livello_idrometrico_sensore_3405_ponte_garibaldi'
+    ]
+
+    # Gestione valori mancanti (imputazione semplice con la media) - (rimane invariata)
     for col in data.columns:
         if data[col].isnull().any():
             data[col] = data[col].fillna(data[col].mean())
 
-    # Normalizzazione dei dati
+    # Normalizzazione dei dati (rimane invariata)
     scaler = MinMaxScaler()
     scaled_data = scaler.fit_transform(data)
     scaled_data = pd.DataFrame(scaled_data, columns=data.columns)
 
+    # Creazione sequenze (rimane invariata)
     X, y = create_sequences(scaled_data, input_window, output_horizon, target_sensors, feature_columns)
 
-    # Divisione in training, validation e test set
+    # Divisione in training, validation e test set (rimane invariata)
     X_train, X_temp, y_train, y_temp = train_test_split(X, y, test_size=0.3, random_state=42, shuffle=False) # shuffle=False per dati time-series
     X_val, X_test, y_val, y_test = train_test_split(X_temp, y_temp, test_size=0.5, random_state=42, shuffle=False) # shuffle=False per dati time-series
 
-    # Conversione in tensori PyTorch e creazione DataLoader
+    # Conversione in tensori PyTorch e creazione DataLoader (rimane invariata)
     X_train_tensor = torch.tensor(X_train, dtype=torch.float32)
     y_train_tensor = torch.tensor(y_train, dtype=torch.float32)
     X_val_tensor = torch.tensor(X_val, dtype=torch.float32)
@@ -179,7 +206,7 @@ if __name__ == '__main__':
     val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=batch_size, shuffle=False) # shuffle=False per dati time-series
     test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, shuffle=False) # shuffle=False per dati time-series
 
-    # Inizializzazione modello, loss function e optimizer
+    # Inizializzazione modello, loss function e optimizer (rimane invariata)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     input_size = X_train_tensor.shape[2] # Numero di features in input
     hidden_size = 64
@@ -191,17 +218,17 @@ if __name__ == '__main__':
     optimizer = optim.Adam(model.parameters(), lr=0.001)
     num_epochs = 100
 
-    # Training del modello
+    # Training del modello (rimane invariata)
     history, trained_model = train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs, device)
 
-    # Valutazione sul test set
+    # Valutazione sul test set (rimane invariata)
     test_loss, predictions, actuals = evaluate_model(trained_model, test_loader, criterion, device)
     print(f'Test Loss: {test_loss:.4f}')
 
-    # Plot della loss curve
+    # Plot della loss curve (rimane invariata)
     plot_loss_curve(history)
 
-    # Salvataggio del modello e dello scaler
+    # Salvataggio del modello e dello scaler (rimane invariata)
     torch.save(trained_model.state_dict(), 'hydrological_lstm_model.pth')
     torch.save(scaler, 'scaler.pkl')
     print("Modello e scaler salvati con successo!")
