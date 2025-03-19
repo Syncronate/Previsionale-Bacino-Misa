@@ -1,117 +1,26 @@
 import streamlit as st
 import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
 import pandas as pd
 import numpy as np
-from sklearn.preprocessing import MinMaxScaler
-from sklearn.model_selection import train_test_split
 import matplotlib.pyplot as plt
-import io
+import seaborn as sns
+import torch.nn as nn
+from sklearn.preprocessing import MinMaxScaler
 import os
+import io
+import base64
+from datetime import datetime, timedelta
 
-# Impostazioni dei parametri (possono essere modificati nella dashboard)
-INPUT_WINDOW = 24
-OUTPUT_WINDOW = 12
-BATCH_SIZE = 32
-EPOCHS = 100
-LEARNING_RATE = 0.001
-HIDDEN_SIZE = 128
-NUM_LAYERS = 2
-DROPOUT = 0.2
-DEFAULT_DATA_PATH = 'dati_idro.csv' # Percorso predefinito per i dati
-
-# Preparazione dei dati (funzioni dal codice originale)
-class HydroDataset(Dataset):
-    def __init__(self, features, targets):
-        self.features = features
-        self.targets = targets
-
-    def __len__(self):
-        return len(self.features)
-
-    def __getitem__(self, idx):
-        return self.features[idx], self.targets[idx]
-
-def prepare_data(data_path, input_window=INPUT_WINDOW, output_window=OUTPUT_WINDOW):
-    try:
-        df = pd.read_csv(data_path, sep=';', parse_dates=['Data e Ora'])
-    except FileNotFoundError:
-        st.error(f"File non trovato: {data_path}. Assicurati che il file esista o carica un file CSV.")
-        return None, None, None, None, None, None, None
-
-    rain_features = [
-        'Cumulata Sensore 1295 (Arcevia)',
-        'Cumulata Sensore 2637 (Bettolelle)',
-        'Cumulata Sensore 2858 (Barbara)',
-        'Cumulata Sensore 2964 (Corinaldo)'
-    ]
-
-    humidity_feature = ['Umidita\' Sensore 3452 (Montemurello)']
-
-    hydro_features = [
-        'Livello Idrometrico Sensore 1008 [m] (Serra dei Conti)',
-        'Livello Idrometrico Sensore 1112 [m] (Bettolelle)',
-        'Livello Idrometrico Sensore 1283 [m] (Corinaldo/Nevola)',
-        'Livello Idrometrico Sensore 3072 [m] (Pianello di Ostra)',
-        'Livello Idrometrico Sensore 3405 [m] (Ponte Garibaldi)'
-    ]
-
-    feature_columns = rain_features + humidity_feature + hydro_features
-
-    st.write("Tipi di dati iniziali delle colonne:")
-    st.write(df[feature_columns].dtypes)
-
-    # Conversione forzata a numerico e gestione degli errori
-    for col in feature_columns:
-        df[col] = pd.to_numeric(df[col], errors='coerce')
-
-    st.write("Tipi di dati dopo la conversione a numerico:")
-    st.write(df[feature_columns].dtypes)
-
-    # Riempimento dei valori mancanti con la media
-    df[feature_columns] = df[feature_columns].fillna(df[feature_columns].mean())
-
-    scaler_features = MinMaxScaler()
-    scaler_targets = MinMaxScaler()
-
-    features_normalized = scaler_features.fit_transform(df[feature_columns])
-    targets_normalized = scaler_targets.fit_transform(df[hydro_features])
-
-    X, y = [], []
-    for i in range(len(df) - input_window - output_window + 1):
-        X.append(features_normalized[i:i+input_window])
-        y.append(targets_normalized[i+input_window:i+input_window+output_window])
-
-    X = np.array(X)
-    y = np.array(y)
-
-    X_train, X_temp, y_train, y_temp = train_test_split(X, y, test_size=0.3, random_state=42)
-    X_val, X_test, y_val, y_test = train_test_split(X_temp, y_temp, test_size=0.5, random_state=42)
-
-    X_train = torch.FloatTensor(X_train)
-    y_train = torch.FloatTensor(y_train)
-    X_val = torch.FloatTensor(X_val)
-    y_val = torch.FloatTensor(y_val)
-    X_test = torch.FloatTensor(X_test)
-    y_test = torch.FloatTensor(y_test)
-
-    train_dataset = HydroDataset(X_train, y_train)
-    val_dataset = HydroDataset(X_val, y_val)
-    test_dataset = HydroDataset(X_test, y_test)
-
-    return train_dataset, val_dataset, test_dataset, scaler_features, scaler_targets, feature_columns, hydro_features
-
-# Definizione del modello LSTM (funzione dal codice originale)
+# Ripristino delle classi e funzioni dal modello originale
 class HydroLSTM(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size, output_window, num_layers=NUM_LAYERS, dropout=DROPOUT):
+    def __init__(self, input_size, hidden_size, output_size, output_window, num_layers=2, dropout=0.2):
         super(HydroLSTM, self).__init__()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.output_window = output_window
         self.output_size = output_size
-
+        
+        # LSTM layer
         self.lstm = nn.LSTM(
             input_size=input_size,
             hidden_size=hidden_size,
@@ -119,277 +28,508 @@ class HydroLSTM(nn.Module):
             batch_first=True,
             dropout=dropout if num_layers > 1 else 0
         )
+        
+        # Fully connected layer per la previsione dei livelli idrometrici
         self.fc = nn.Linear(hidden_size, output_size * output_window)
-
+        
     def forward(self, x):
+        # x shape: (batch_size, seq_len, input_size)
+        
+        # Inizializzazione dello stato nascosto
         h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
         c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
+        
+        # LSTM forward pass
+        # out shape: (batch_size, seq_len, hidden_size)
         out, _ = self.lstm(x, (h0, c0))
+        
+        # Prendiamo solo l'output dell'ultimo timestep
         out = out[:, -1, :]
+        
+        # Fully connected layer
+        # out shape: (batch_size, output_size * output_window)
         out = self.fc(out)
+        
+        # Reshaping per ottenere la sequenza di output
+        # out shape: (batch_size, output_window, output_size)
         out = out.view(out.size(0), self.output_window, self.output_size)
+        
         return out
 
-# Addestramento del modello (funzione modificata per Streamlit)
-def train_model(train_loader, val_loader, input_size, output_size, output_window, device, epochs=EPOCHS, learning_rate=LEARNING_RATE):
-    model = HydroLSTM(input_size, HIDDEN_SIZE, output_size, output_window).to(device)
-    criterion = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-
-    train_losses = []
-    val_losses = []
-    best_val_loss = float('inf')
-
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-
-    for epoch in range(epochs):
-        model.train()
-        train_loss = 0.0
-
-        for inputs, targets in train_loader:
-            inputs, targets = inputs.to(device), targets.to(device)
-
-            optimizer.zero_grad()
-            outputs = model(inputs)
-            loss = criterion(outputs, targets)
-            loss.backward()
-            optimizer.step()
-
-            train_loss += loss.item()
-
-        train_loss /= len(train_loader)
-        train_losses.append(train_loss)
-
-        model.eval()
-        val_loss = 0.0
-        with torch.no_grad():
-            for inputs, targets in val_loader:
-                inputs, targets = inputs.to(device), targets.to(device)
-                outputs = model(inputs)
-                loss = criterion(outputs, targets)
-                val_loss += loss.item()
-
-        val_loss /= len(val_loader)
-        val_losses.append(val_loss)
-
-        status_text.text(f"Epoch {epoch+1}/{epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
-        progress_bar.progress((epoch + 1) / epochs)
-
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            print(f"Best validation loss improved, saving model to: best_hydro_model.pth, current working directory: {os.getcwd()}") # Debug print
-            torch.save(model.state_dict(), 'best_hydro_model.pth')
-
-    print(f"Training finished, current working directory before loading: {os.getcwd()}") # Debug print
-    if os.path.exists('best_hydro_model.pth'): # Check if file exists before loading
-        print("best_hydro_model.pth file found, loading model state.")
-        model.load_state_dict(torch.load('best_hydro_model.pth', map_location=device))
-    else:
-        print("best_hydro_model.pth file NOT FOUND in current directory.") # Debug print
-        st.error("Modello non trovato dopo l'addestramento! Controlla i log.") # Streamlit error message
-    status_text.success("Training completato!")
-    return model, train_losses, val_losses
-
-# Valutazione del modello (funzione dal codice originale)
-def evaluate_model(model, test_loader, device, scaler_targets, hydro_features):
+# Funzione per caricare il modello addestrato
+@st.cache_resource
+def load_model(model_path, input_size, output_size, output_window):
+    # Definizione delle costanti
+    HIDDEN_SIZE = 128
+    NUM_LAYERS = 2
+    
+    # Impostazione del device
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    # Creazione del modello
+    model = HydroLSTM(input_size, HIDDEN_SIZE, output_size, output_window, NUM_LAYERS).to(device)
+    
+    # Caricamento dei pesi del modello
+    model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
-    test_loss = 0.0
-    criterion = nn.MSELoss()
+    
+    return model, device
 
-    all_predictions = []
-    all_targets = []
+# Funzione per caricare gli scaler
+@st.cache_resource
+def load_scalers(scaler_features_path, scaler_targets_path):
+    import joblib
+    scaler_features = joblib.load(scaler_features_path)
+    scaler_targets = joblib.load(scaler_targets_path)
+    return scaler_features, scaler_targets
 
+# Funzione per fare previsioni
+def predict(model, input_data, scaler_features, scaler_targets, hydro_features, device, output_window):
+    """
+    Funzione per fare previsioni con il modello addestrato.
+    
+    Args:
+        model: Il modello addestrato
+        input_data: Dati di input non normalizzati (array di forma [input_window, num_features])
+        scaler_features: Scaler per normalizzare i dati di input
+        scaler_targets: Scaler per denormalizzare le previsioni
+        hydro_features: Nomi dei sensori idrometrici
+        device: Dispositivo (CPU/GPU)
+    
+    Returns:
+        Previsioni denormalizzate
+    """
+    model.eval()
+    
+    # Normalizzazione dei dati di input
+    input_normalized = scaler_features.transform(input_data)
+    
+    # Conversione in tensore PyTorch
+    input_tensor = torch.FloatTensor(input_normalized).unsqueeze(0).to(device)
+    
+    # Previsione
     with torch.no_grad():
-        for inputs, targets in test_loader:
-            inputs, targets = inputs.to(device), targets.to(device)
-            outputs = model(inputs)
-            loss = criterion(outputs, targets)
-            test_loss += loss.item()
+        output = model(input_tensor)
+    
+    # Conversione in numpy
+    output_np = output.cpu().numpy().reshape(-1, len(hydro_features))
+    
+    # Denormalizzazione
+    predictions = scaler_targets.inverse_transform(output_np)
+    
+    # Reshape per ottenere [output_window, num_hydro_features]
+    predictions = predictions.reshape(output_window, len(hydro_features))
+    
+    return predictions
 
-            all_predictions.append(outputs.cpu().numpy())
-            all_targets.append(targets.cpu().numpy())
-
-    test_loss /= len(test_loader)
-    st.write(f'Test Loss: {test_loss:.4f}')
-
-    all_predictions = np.concatenate(all_predictions, axis=0)
-    all_targets = np.concatenate(all_targets, axis=0)
-
-    pred_shape = all_predictions.shape
-    all_predictions_reshaped = all_predictions.reshape(-1, len(hydro_features))
-    all_targets_reshaped = all_targets.reshape(-1, len(hydro_features))
-
-    all_predictions_original = scaler_targets.inverse_transform(all_predictions_reshaped)
-    all_targets_original = scaler_targets.inverse_transform(all_targets_reshaped)
-
-    all_predictions_original = all_predictions_original.reshape(pred_shape)
-    all_targets_original = all_targets_original.reshape(pred_shape)
-
-    return all_predictions_original, all_targets_original, test_loss
-
-# Funzione per la visualizzazione dei risultati (modificata per Streamlit)
-def plot_results(predictions, targets, hydro_features, output_window):
-    st.subheader("Visualizzazione Previsioni vs Valori Reali")
-    sample_idx = np.random.randint(0, len(predictions))
-
+# Funzione per plot dei risultati
+def plot_predictions(predictions, hydro_features, output_window, start_time=None):
+    figures = []
+    
+    # Per ogni sensore idrometrico
     for i, sensor_name in enumerate(hydro_features):
-        fig, ax = plt.subplots(figsize=(10, 4))
-        hours = np.arange(output_window)
-        ax.plot(hours, predictions[sample_idx, :, i], label='Previsione', marker='o')
-        ax.plot(hours, targets[sample_idx, :, i], label='Valore Reale', marker='x')
-        ax.set_title(f'Previsione vs Valore Reale - {sensor_name}')
-        ax.set_xlabel('Ore future')
+        fig, ax = plt.subplots(figsize=(10, 5))
+        
+        # Creazione dell'asse x per le ore future
+        if start_time:
+            hours = [start_time + timedelta(hours=h) for h in range(output_window)]
+            ax.plot(hours, predictions[:, i], marker='o', linestyle='-', label=f'Previsione {sensor_name}')
+            plt.gcf().autofmt_xdate()
+        else:
+            hours = np.arange(output_window)
+            ax.plot(hours, predictions[:, i], marker='o', linestyle='-', label=f'Previsione {sensor_name}')
+            ax.set_xlabel('Ore future')
+        
+        ax.set_title(f'Previsione - {sensor_name}')
         ax.set_ylabel('Livello idrometrico [m]')
         ax.legend()
         ax.grid(True)
-        st.pyplot(fig)
-        plt.close(fig) # Close figure to prevent display issues
+        plt.tight_layout()
+        
+        figures.append(fig)
+    
+    return figures
 
-    st.subheader("Errore Quadratico Medio (MSE) per Sensore")
-    mse_per_sensor = np.mean((predictions - targets)**2, axis=(0, 1))
-    fig_mse, ax_mse = plt.subplots(figsize=(10, 4))
-    ax_mse.bar(hydro_features, mse_per_sensor)
-    ax_mse.set_title('MSE per Sensore Idrometrico')
-    ax_mse.set_ylabel('MSE')
-    ax_mse.tick_params(axis='x', rotation=45)
-    st.pyplot(fig_mse)
-    plt.close(fig_mse)
+# Funzione per ottenere un link di download per un file
+def get_table_download_link(df):
+    """Genera un link per scaricare il dataframe come file CSV"""
+    csv = df.to_csv(index=False)
+    b64 = base64.b64encode(csv.encode()).decode()
+    return f'<a href="data:file/csv;base64,{b64}" download="previsioni.csv">Scarica i dati CSV</a>'
 
+# Funzione per scaricare grafici
+def get_image_download_link(fig, filename, text):
+    """Genera un link per scaricare il grafico come immagine"""
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png')
+    buf.seek(0)
+    b64 = base64.b64encode(buf.getvalue()).decode()
+    return f'<a href="data:image/png;base64,{b64}" download="{filename}">Scarica {text}</a>'
 
-# Funzione per fare una previsione (funzione dal codice originale con adattamenti)
-def predict(model, input_data, scaler_features, scaler_targets, hydro_features, device):
-    model.eval()
-    input_normalized = scaler_features.transform(input_data)
-    input_tensor = torch.FloatTensor(input_normalized).unsqueeze(0).to(device)
-    with torch.no_grad():
-        output = model(input_tensor)
-    output_np = output.cpu().numpy().reshape(-1, len(hydro_features))
-    predictions = scaler_targets.inverse_transform(output_np)
-    predictions = predictions.reshape(OUTPUT_WINDOW, len(hydro_features))
-    return predictions
+# Titolo dell'app
+st.title('Dashboard Modello Predittivo Idrologico')
 
-# Streamlit app
-def main():
-    st.title("Dashboard Previsionale Livelli Idrometrici")
+# Sidebar per le opzioni
+st.sidebar.header('Impostazioni')
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    st.write(f"Dispositivo utilizzato: {device}")
+# Opzione per caricare i propri file o usare quelli demo
+use_demo_files = st.sidebar.checkbox('Usa file di esempio', value=True)
 
-    uploaded_file = st.file_uploader("Carica il tuo file CSV di dati", type=["csv"])
-    data_path = DEFAULT_DATA_PATH # Usa il percorso predefinito se non viene caricato un file
-    if uploaded_file is not None:
-        # Salva il file caricato temporaneamente per essere letto da pandas
-        with open("temp.csv", "wb") as f:
-            f.write(uploaded_file.getbuffer())
-        data_path = "temp.csv"
-    elif not os.path.exists(DEFAULT_DATA_PATH):
-        st.warning(f"File dati predefinito '{DEFAULT_DATA_PATH}' non trovato. Carica un file CSV per iniziare.")
-        return
+if use_demo_files:
+    # Qui dovresti fornire percorsi ai file di esempio
+    DATA_PATH = 'dati_idro.csv'  # Sostituisci con il percorso corretto
+    MODEL_PATH = 'best_hydro_model.pth'  # Sostituisci con il percorso corretto
+    SCALER_FEATURES_PATH = 'scaler_features.joblib'  # Sostituisci con il percorso corretto
+    SCALER_TARGETS_PATH = 'scaler_targets.joblib'  # Sostituisci con il percorso corretto
+else:
+    # Caricamento dei file dall'utente
+    st.sidebar.subheader('Carica i tuoi file')
+    data_file = st.sidebar.file_uploader('File CSV con i dati storici', type=['csv'])
+    model_file = st.sidebar.file_uploader('File del modello (.pth)', type=['pth'])
+    scaler_features_file = st.sidebar.file_uploader('File scaler features (.joblib)', type=['joblib'])
+    scaler_targets_file = st.sidebar.file_uploader('File scaler targets (.joblib)', type=['joblib'])
+    
+    # Controllo se tutti i file sono stati caricati
+    if data_file and model_file and scaler_features_file and scaler_targets_file:
+        # Salvataggio temporaneo dei file caricati
+        DATA_PATH = 'temp_data.csv'
+        MODEL_PATH = 'temp_model.pth'
+        SCALER_FEATURES_PATH = 'temp_scaler_features.joblib'
+        SCALER_TARGETS_PATH = 'temp_scaler_targets.joblib'
+        
+        with open(DATA_PATH, 'wb') as f:
+            f.write(data_file.getbuffer())
+        with open(MODEL_PATH, 'wb') as f:
+            f.write(model_file.getbuffer())
+        with open(SCALER_FEATURES_PATH, 'wb') as f:
+            f.write(scaler_features_file.getbuffer())
+        with open(SCALER_TARGETS_PATH, 'wb') as f:
+            f.write(scaler_targets_file.getbuffer())
+    else:
+        st.sidebar.warning('Carica tutti i file necessari per procedere')
+        st.stop()
 
-    if data_path:
-        train_dataset, val_dataset, test_dataset, scaler_features, scaler_targets, feature_columns, hydro_features = prepare_data(data_path)
+# Definizione delle costanti
+INPUT_WINDOW = 24  # 24 ore di dati storici
+OUTPUT_WINDOW = 12  # 12 ore di previsione
 
-        if train_dataset is None: # Gestisci il caso in cui prepare_data fallisce (e.g., file non trovato)
-            return
+# Caricamento dei dati storici
+try:
+    df = pd.read_csv(DATA_PATH, sep=';', parse_dates=['Data e Ora'])
+    st.sidebar.success(f'Dati caricati: {len(df)} righe')
+except Exception as e:
+    st.error(f'Errore nel caricamento dei dati: {e}')
+    st.stop()
 
-        train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-        val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE)
-        test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE)
+# Estrazione delle caratteristiche
+rain_features = [
+    'Cumulata Sensore 1295 (Arcevia)',
+    'Cumulata Sensore 2637 (Bettolelle)',
+    'Cumulata Sensore 2858 (Barbara)',
+    'Cumulata Sensore 2964 (Corinaldo)'
+]
 
-        input_size = len(feature_columns)
-        output_size = len(hydro_features)
+humidity_feature = ['Umidita\' Sensore 3452 (Montemurello)']
 
-        if st.checkbox("Addestra il Modello"):
-            epochs = st.slider("Numero di Epoche", 10, 300, EPOCHS)
-            learning_rate = st.number_input("Learning Rate", value=LEARNING_RATE, format="%.5f")
+hydro_features = [
+    'Livello Idrometrico Sensore 1008 [m] (Serra dei Conti)',
+    'Livello Idrometrico Sensore 1112 [m] (Bettolelle)',
+    'Livello Idrometrico Sensore 1283 [m] (Corinaldo/Nevola)',
+    'Livello Idrometrico Sensore 3072 [m] (Pianello di Ostra)',
+    'Livello Idrometrico Sensore 3405 [m] (Ponte Garibaldi)'
+]
 
-            if st.button("Avvia Addestramento"):
-                with st.spinner("Addestramento del modello in corso..."):
-                    model, train_losses, val_losses = train_model(train_loader, val_loader, input_size, output_size, OUTPUT_WINDOW, device, epochs, learning_rate)
-                    st.success("Modello addestrato con successo!")
+feature_columns = rain_features + humidity_feature + hydro_features
 
-                    # Visualizza le curve di perdita dopo l'addestramento
-                    st.subheader("Curve di Perdita durante l'Addestramento")
-                    fig_loss, ax_loss = plt.subplots(figsize=(10, 4))
-                    ax_loss.plot(train_losses, label='Train Loss')
-                    ax_loss.plot(val_losses, label='Validation Loss')
-                    ax_loss.set_title('Curve di Perdita')
-                    ax_loss.set_xlabel('Epoca')
-                    ax_loss.set_ylabel('Loss')
-                    ax_loss.legend()
-                    ax_loss.grid(True)
-                    st.pyplot(fig_loss)
-                    plt.close(fig_loss) # Close figure to prevent display issues
+# Caricamento del modello e degli scaler
+try:
+    model, device = load_model(MODEL_PATH, len(feature_columns), len(hydro_features), OUTPUT_WINDOW)
+    scaler_features, scaler_targets = load_scalers(SCALER_FEATURES_PATH, SCALER_TARGETS_PATH)
+    st.sidebar.success('Modello e scaler caricati con successo')
+except Exception as e:
+    st.error(f'Errore nel caricamento del modello o degli scaler: {e}')
+    st.stop()
 
-                    # Valutazione e visualizzazione solo dopo l'addestramento
-                    st.subheader("Valutazione del Modello")
-                    predictions, targets, test_loss = evaluate_model(model, test_loader, device, scaler_targets, hydro_features)
-                    plot_results(predictions, targets, hydro_features, OUTPUT_WINDOW)
+# Menu principale
+st.sidebar.header('Menu')
+page = st.sidebar.radio('Scegli una funzionalità', 
+                        ['Dashboard', 'Simulazione', 'Analisi Dati Storici'])
 
-                    # Download del modello
-                    model_state = io.BytesIO()
-                    torch.save(model.state_dict(), model_state)
-                    model_state.seek(0)
-                    st.download_button(
-                        label="Scarica Modello Addestrato",
-                        data=model_state,
-                        file_name="hydro_model.pth",
-                        mime="application/octet-stream"
-                    )
-            else:
-                model = None # Modello non addestrato
+if page == 'Dashboard':
+    st.header('Dashboard Idrologica')
+    
+    # Mostra ultimi dati disponibili
+    st.subheader('Ultimi dati disponibili')
+    last_data = df.iloc[-1]
+    last_date = last_data['Data e Ora']
+    
+    # Formattazione dei dati per la visualizzazione
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.write(f"**Data e ora ultimo rilevamento:** {last_date}")
+        
+        # Ultimi dati idrologici
+        st.subheader('Livelli idrometrici attuali')
+        hydro_data = []
+        for feature in hydro_features:
+            hydro_data.append({'Sensore': feature, 'Valore [m]': last_data[feature]})
+        st.dataframe(pd.DataFrame(hydro_data).round(3))
+    
+    with col2:
+        # Ultimi dati di pioggia
+        st.subheader('Precipitazioni cumulate attuali')
+        rain_data = []
+        for feature in rain_features:
+            rain_data.append({'Sensore': feature, 'Valore [mm]': last_data[feature]})
+        st.dataframe(pd.DataFrame(rain_data).round(2))
+        
+        # Umidità
+        st.subheader('Umidità attuale')
+        st.write(f"{humidity_feature[0]}: {last_data[humidity_feature[0]]:.1f}%")
+    
+    # Previsione basata sugli ultimi dati disponibili
+    st.header('Previsione in base agli ultimi dati')
+    
+    if st.button('Genera previsione'):
+        with st.spinner('Generazione previsione in corso...'):
+            # Preparazione dei dati di input (ultime INPUT_WINDOW ore)
+            latest_data = df.iloc[-INPUT_WINDOW:][feature_columns].values
+            
+            # Previsione
+            predictions = predict(model, latest_data, scaler_features, scaler_targets, hydro_features, device, OUTPUT_WINDOW)
+            
+            # Visualizzazione dei risultati
+            st.subheader(f'Previsione per le prossime {OUTPUT_WINDOW} ore')
+            
+            # Creazione dataframe risultati
+            start_time = last_date
+            prediction_times = [start_time + timedelta(hours=i) for i in range(OUTPUT_WINDOW)]
+            results_df = pd.DataFrame(predictions, columns=hydro_features)
+            results_df['Ora previsione'] = prediction_times
+            results_df = results_df[['Ora previsione'] + hydro_features]
+            
+            # Visualizzazione tabella risultati
+            st.dataframe(results_df.round(3))
+            
+            # Download dei risultati
+            st.markdown(get_table_download_link(results_df), unsafe_allow_html=True)
+            
+            # Grafici per ogni sensore
+            st.subheader('Grafici delle previsioni')
+            figs = plot_predictions(predictions, hydro_features, OUTPUT_WINDOW, start_time)
+            
+            # Visualizzazione grafici
+            for i, fig in enumerate(figs):
+                st.pyplot(fig)
+                sensor_name = hydro_features[i].replace(' ', '_').replace('/', '_')
+                st.markdown(get_image_download_link(fig, f"{sensor_name}.png", f"il grafico di {hydro_features[i]}"), unsafe_allow_html=True)
+            
+elif page == 'Simulazione':
+    st.header('Simulazione Idrologica')
+    st.write('Inserisci i valori per simulare uno scenario idrologico')
+    
+    # Opzioni per la simulazione
+    sim_method = st.radio(
+        "Metodo di simulazione",
+        ['Modifica dati recenti', 'Inserisci manualmente tutti i valori']
+    )
+    
+    if sim_method == 'Modifica dati recenti':
+        # Prendiamo i dati recenti come base
+        recent_data = df.iloc[-INPUT_WINDOW:][feature_columns].copy()
+        
+        # Permettiamo all'utente di modificare la pioggia
+        st.subheader('Modifica valori di pioggia')
+        rain_multiplier = st.slider('Fattore moltiplicativo pioggia', 0.0, 5.0, 1.0, 0.1)
+        
+        # Modifichiamo i valori di pioggia
+        for col in rain_features:
+            recent_data[col] = recent_data[col] * rain_multiplier
+        
+        # Permettiamo all'utente di modificare l'umidità
+        st.subheader('Modifica valori di umidità')
+        humidity_value = st.slider('Umidità (%)', 0.0, 100.0, float(recent_data[humidity_feature[0]].mean()), 0.5)
+        recent_data[humidity_feature[0]] = humidity_value
+        
+        # Prendiamo i valori modificati
+        sim_data = recent_data.values
+        
+    else:  # Inserimento manuale completo
+        st.subheader('Inserisci valori per ogni parametro')
+        
+        # Creiamo un dataframe vuoto per i dati della simulazione
+        sim_data = np.zeros((INPUT_WINDOW, len(feature_columns)))
+        
+        # Raggruppiamo i controlli per tipo di sensore
+        with st.expander("Imposta valori di pioggia"):
+            for i, feature in enumerate(rain_features):
+                value = st.number_input(f'{feature} (mm)', 0.0, 100.0, 0.0, 0.5)
+                sim_data[:, i] = value
+        
+        with st.expander("Imposta valore di umidità"):
+            value = st.number_input(f'{humidity_feature[0]} (%)', 0.0, 100.0, 50.0, 0.5)
+            sim_data[:, len(rain_features)] = value
+        
+        with st.expander("Imposta livelli idrometrici"):
+            offset = len(rain_features) + len(humidity_feature)
+            for i, feature in enumerate(hydro_features):
+                value = st.number_input(f'{feature} (m)', -1.0, 10.0, 0.0, 0.01)
+                sim_data[:, offset + i] = value
+    
+    # Bottone per eseguire la simulazione
+    if st.button('Esegui simulazione'):
+        with st.spinner('Simulazione in corso...'):
+            # Previsione
+            predictions = predict(model, sim_data, scaler_features, scaler_targets, hydro_features, device, OUTPUT_WINDOW)
+            
+            # Visualizzazione dei risultati
+            st.subheader(f'Previsione per le prossime {OUTPUT_WINDOW} ore')
+            
+            # Creazione dataframe risultati
+            current_time = datetime.now()
+            prediction_times = [current_time + timedelta(hours=i) for i in range(OUTPUT_WINDOW)]
+            results_df = pd.DataFrame(predictions, columns=hydro_features)
+            results_df['Ora previsione'] = prediction_times
+            results_df = results_df[['Ora previsione'] + hydro_features]
+            
+            # Visualizzazione tabella risultati
+            st.dataframe(results_df.round(3))
+            
+            # Download dei risultati
+            st.markdown(get_table_download_link(results_df), unsafe_allow_html=True)
+            
+            # Grafici per ogni sensore
+            st.subheader('Grafici delle previsioni')
+            figs = plot_predictions(predictions, hydro_features, OUTPUT_WINDOW, current_time)
+            
+            # Visualizzazione grafici
+            for i, fig in enumerate(figs):
+                st.pyplot(fig)
+                sensor_name = hydro_features[i].replace(' ', '_').replace('/', '_')
+                st.markdown(get_image_download_link(fig, f"sim_{sensor_name}.png", f"il grafico di {hydro_features[i]}"), unsafe_allow_html=True)
 
-        else: # Se "Addestra il Modello" non è selezionato, prova a caricare un modello pre-addestrato per la previsione
-            model = HydroLSTM(input_size, HIDDEN_SIZE, output_size, OUTPUT_WINDOW).to(device)
-            try:
-                model.load_state_dict(torch.load('best_hydro_model.pth', map_location=device))
-                st.success("Modello pre-addestrato caricato.")
-            except FileNotFoundError:
-                st.warning("Modello pre-addestrato non trovato. Addestra il modello o carica un modello addestrato.")
-                model = None
+elif page == 'Analisi Dati Storici':
+    st.header('Analisi Dati Storici')
+    
+    # Selezione dell'intervallo di date
+    st.subheader('Seleziona l\'intervallo di date')
+    min_date = df['Data e Ora'].min().date()
+    max_date = df['Data e Ora'].max().date()
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        start_date = st.date_input('Data inizio', min_date, min_value=min_date, max_value=max_date)
+    with col2:
+        end_date = st.date_input('Data fine', max_date, min_value=min_date, max_value=max_date)
+    
+    # Filtraggio dei dati
+    mask = (df['Data e Ora'].dt.date >= start_date) & (df['Data e Ora'].dt.date <= end_date)
+    filtered_df = df.loc[mask]
+    
+    if len(filtered_df) > 0:
+        st.success(f'Trovate {len(filtered_df)} righe nel periodo selezionato')
+        
+        # Tipo di analisi
+        analysis_type = st.selectbox(
+            'Seleziona il tipo di analisi',
+            ['Andamento temporale', 'Correlazione tra sensori', 'Statistiche descrittive']
+        )
+        
+        if analysis_type == 'Andamento temporale':
+            st.subheader('Andamento temporale dei dati')
+            
+            # Selezione dei sensori
+            sensor_type = st.radio('Tipo di sensore', ['Idrometri', 'Pluviometri', 'Umidità'])
+            
+            if sensor_type == 'Idrometri':
+                sensors = st.multiselect('Seleziona i sensori', hydro_features, default=[hydro_features[0]])
+            elif sensor_type == 'Pluviometri':
+                sensors = st.multiselect('Seleziona i sensori', rain_features, default=[rain_features[0]])
+            else:  # Umidità
+                sensors = humidity_feature
+            
+            if sensors:
+                # Creazione del grafico
+                fig, ax = plt.subplots(figsize=(12, 6))
+                
+                for sensor in sensors:
+                    ax.plot(filtered_df['Data e Ora'], filtered_df[sensor], label=sensor)
+                
+                ax.set_xlabel('Data e Ora')
+                ax.set_ylabel('Valore')
+                ax.set_title(f'Andamento temporale {"".join(sensors)} - {start_date} a {end_date}')
+                ax.legend()
+                ax.grid(True)
+                plt.xticks(rotation=45)
+                plt.tight_layout()
+                
+                st.pyplot(fig)
+                st.markdown(get_image_download_link(fig, "andamento_temporale.png", "questo grafico"), unsafe_allow_html=True)
+        
+        elif analysis_type == 'Correlazione tra sensori':
+            st.subheader('Analisi di correlazione tra sensori')
+            
+            # Selezione delle variabili
+            corr_features = st.multiselect(
+                'Seleziona le variabili da analizzare',
+                feature_columns,
+                default=[hydro_features[0], rain_features[0]]
+            )
+            
+            if len(corr_features) > 1:
+                # Matrice di correlazione
+                corr_matrix = filtered_df[corr_features].corr()
+                
+                # Heatmap
+                fig, ax = plt.subplots(figsize=(10, 8))
+                sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', ax=ax, fmt='.2f')
+                plt.title('Matrice di correlazione')
+                plt.tight_layout()
+                
+                st.pyplot(fig)
+                st.markdown(get_image_download_link(fig, "correlazione.png", "questa matrice di correlazione"), unsafe_allow_html=True)
+                
+                # Scatterplot
+                if len(corr_features) == 2:
+                    fig, ax = plt.subplots(figsize=(10, 6))
+                    sns.scatterplot(data=filtered_df, x=corr_features[0], y=corr_features[1], ax=ax)
+                    plt.title(f'Scatterplot {corr_features[0]} vs {corr_features[1]}')
+                    plt.tight_layout()
+                    
+                    st.pyplot(fig)
+                    st.markdown(get_image_download_link(fig, "scatterplot.png", "questo scatterplot"), unsafe_allow_html=True)
+        
+        else:  # Statistiche descrittive
+            st.subheader('Statistiche descrittive')
+            
+            # Selezione delle variabili
+            stat_features = st.multiselect(
+                'Seleziona le variabili da analizzare',
+                feature_columns,
+                default=hydro_features
+            )
+            
+            if stat_features:
+                # Statistiche descrittive
+                stats_df = filtered_df[stat_features].describe().T
+                st.dataframe(stats_df.round(3))
+                
+                # Download statistiche
+                st.markdown(get_table_download_link(stats_df.reset_index().rename(columns={'index': 'Sensore'})), unsafe_allow_html=True)
+                
+                # Boxplot
+                fig, ax = plt.subplots(figsize=(12, 6))
+                filtered_df[stat_features].boxplot(ax=ax)
+                plt.title('Boxplot delle variabili selezionate')
+                plt.xticks(rotation=90)
+                plt.tight_layout()
+                
+                st.pyplot(fig)
+                st.markdown(get_image_download_link(fig, "boxplot.png", "questo boxplot"), unsafe_allow_html=True)
+    else:
+        st.warning('Nessun dato disponibile nel periodo selezionato')
 
-        if model: # Esegui la previsione solo se c'è un modello (addestrato o caricato)
-            st.subheader("Previsione Livelli Idrometrici")
-            # Input per la previsione (ultime INPUT_WINDOW ore di dati)
-            st.write("Inserisci i dati delle ultime", INPUT_WINDOW, "ore per effettuare la previsione.")
-
-            # Crea un DataFrame vuoto con le colonne delle features per l'input
-            input_df = pd.DataFrame(columns=feature_columns, index=range(INPUT_WINDOW))
-
-            # Usa st.data_editor per inserire i dati
-            edited_df = st.data_editor(input_df, num_rows="dynamic")
-
-            if st.button("Effettua Previsione"):
-                # Converti il DataFrame editato in numpy array e gestisci i valori mancanti
-                input_prediction_data = edited_df.fillna(edited_df.mean()).values # Riempi i NaN con la media, potresti voler usare un altro metodo
-                if input_prediction_data.shape == (INPUT_WINDOW, len(feature_columns)):
-                    with st.spinner("Effettuando la previsione..."):
-                        predictions_output = predict(model, input_prediction_data, scaler_features, scaler_targets, hydro_features, device)
-
-                    st.success("Previsione completata!")
-                    st.subheader("Previsioni Livelli Idrometrici per le prossime ore:")
-                    prediction_df = pd.DataFrame(predictions_output, columns=hydro_features, index=[f"Ora +{h+1}" for h in range(OUTPUT_WINDOW)])
-                    st.dataframe(prediction_df)
-
-                    # Visualizza le previsioni con un grafico
-                    st.subheader("Visualizzazione Previsioni")
-                    for i, sensor_name in enumerate(hydro_features):
-                        fig_pred, ax_pred = plt.subplots(figsize=(10, 4))
-                        hours_pred = np.arange(OUTPUT_WINDOW)
-                        ax_pred.plot(hours_pred, predictions_output[:, i], label='Previsione', marker='o')
-                        ax_pred.set_title(f'Previsione Livello Idrometrico - {sensor_name}')
-                        ax_pred.set_xlabel('Ore future')
-                        ax_pred.set_ylabel('Livello idrometrico [m]')
-                        ax_pred.legend()
-                        ax_pred.grid(True)
-                        st.pyplot(fig_pred)
-                        plt.close(fig_pred) # Close figure to prevent display issues
-                else:
-                    st.error("Inserisci dati completi per le ultime 24 ore.")
-
-    if uploaded_file is not None and os.path.exists("temp.csv"):
-        os.remove("temp.csv") # Pulisci il file temporaneo
-
-if __name__ == "__main__":
-    main()
+# Footer della dashboard
+st.sidebar.markdown('---')
+st.sidebar.info('Dashboard per modello predittivo idrologico')
