@@ -11,6 +11,7 @@ import io
 import base64
 from datetime import datetime, timedelta
 import joblib
+import math
 
 # Ripristino delle classi e funzioni dal modello originale
 class HydroLSTM(nn.Module):
@@ -345,7 +346,7 @@ elif page == 'Simulazione':
         # Opzioni per la simulazione
         sim_method = st.radio(
             "Metodo di simulazione",
-            ['Modifica dati recenti', 'Inserisci manualmente tutti i valori']
+            ['Modifica dati recenti', 'Inserisci dati orari', 'Inserisci manualmente tutti i valori']
         )
 
         if sim_method == 'Modifica dati recenti':
@@ -367,6 +368,176 @@ elif page == 'Simulazione':
 
             # Prendiamo i valori modificati
             sim_data = recent_data.values
+
+        elif sim_method == 'Inserisci dati orari':
+            st.subheader('Inserisci dati per ogni ora (24 ore precedenti)')
+
+            # Creiamo un dataframe vuoto per i dati della simulazione
+            sim_data = np.zeros((INPUT_WINDOW, len(feature_columns)))
+
+            # Opzioni per la compilazione rapida
+            st.subheader("Strumenti di compilazione rapida")
+            quick_fill_col1, quick_fill_col2 = st.columns(2)
+
+            with quick_fill_col1:
+                # Opzioni per compilare rapidamente pioggia
+                st.write("Scenario di pioggia")
+                rain_scenario = st.selectbox(
+                    "Seleziona uno scenario predefinito",
+                    ["Nessuna pioggia", "Pioggia leggera", "Pioggia moderata", "Pioggia intensa", "Evento estremo"]
+                )
+
+                rain_values = {
+                    "Nessuna pioggia": 0.0,
+                    "Pioggia leggera": 2.0,
+                    "Pioggia moderata": 5.0,
+                    "Pioggia intensa": 15.0,
+                    "Evento estremo": 30.0
+                }
+
+                rain_duration = st.slider("Durata pioggia (ore)", 0, 24, 6)
+                rain_start = st.slider("Ora di inizio pioggia", 0, 23, 0)
+
+                apply_rain = st.button("Applica scenario di pioggia")
+
+            with quick_fill_col2:
+                # Opzioni per compilare rapidamente umidità
+                st.write("Umidità del terreno")
+                humidity_preset = st.selectbox(
+                    "Seleziona condizione di umidità",
+                    ["Molto secco", "Secco", "Normale", "Umido", "Saturo"]
+                )
+
+                humidity_values = {
+                    "Molto secco": 20.0,
+                    "Secco": 40.0,
+                    "Normale": 60.0,
+                    "Umido": 80.0,
+                    "Saturo": 95.0
+                }
+
+                apply_humidity = st.button("Applica umidità")
+
+            # Creiamo tabs per separare i diversi tipi di dati
+            data_tabs = st.tabs(["Pioggia", "Umidità", "Idrometri"])
+
+            # Prepariamo arrays per memorizzare i valori
+            rain_data = np.zeros((INPUT_WINDOW, len(rain_features)))
+            humidity_data = np.zeros((INPUT_WINDOW, len(humidity_feature)))
+            hydro_data = np.zeros((INPUT_WINDOW, len(hydro_features)))
+
+            # Se l'utente ha cliccato su applica scenario di pioggia
+            if apply_rain:
+                for h in range(rain_duration):
+                    hour_idx = (rain_start + h) % 24
+                    if hour_idx < INPUT_WINDOW:
+                        for i in range(len(rain_features)):
+                            rain_data[hour_idx, i] = rain_values[rain_scenario]
+
+            # Se l'utente ha cliccato su applica umidità
+            if apply_humidity:
+                for h in range(INPUT_WINDOW):
+                    humidity_data[h, 0] = humidity_values[humidity_preset]
+
+            # Tab per la pioggia
+            with data_tabs[0]:
+                st.write("Inserisci i valori di pioggia per ogni ora (mm)")
+
+                # Creiamo un layout a griglia per l'inserimento dei dati orari
+                num_cols = 6  # Numero di colonne nella griglia
+                num_rows = math.ceil(INPUT_WINDOW / num_cols)
+
+                for feature_idx, feature in enumerate(rain_features):
+                    st.write(f"### {feature}")
+
+                    for row in range(num_rows):
+                        cols = st.columns(num_cols)
+                        for col in range(num_cols):
+                            hour_idx = row * num_cols + col
+                            if hour_idx < INPUT_WINDOW:
+                                with cols[col]:
+                                    # Usiamo il valore già calcolato dallo scenario se disponibile
+                                    current_value = rain_data[hour_idx, feature_idx]
+                                    rain_data[hour_idx, feature_idx] = st.number_input(
+                                        f"Ora {hour_idx}",
+                                        0.0, 100.0, current_value, 0.5,
+                                        key=f"rain_{feature_idx}_{hour_idx}"
+                                    )
+
+            # Tab per l'umidità
+            with data_tabs[1]:
+                st.write("Inserisci i valori di umidità per ogni ora (%)")
+
+                for feature_idx, feature in enumerate(humidity_feature):
+                    st.write(f"### {feature}")
+
+                    for row in range(num_rows):
+                        cols = st.columns(num_cols)
+                        for col in range(num_cols):
+                            hour_idx = row * num_cols + col
+                            if hour_idx < INPUT_WINDOW:
+                                with cols[col]:
+                                    # Usiamo il valore già calcolato dallo scenario se disponibile
+                                    current_value = humidity_data[hour_idx, feature_idx]
+                                    humidity_data[hour_idx, feature_idx] = st.number_input(
+                                        f"Ora {hour_idx}",
+                                        0.0, 100.0, current_value, 0.5,
+                                        key=f"humidity_{feature_idx}_{hour_idx}"
+                                    )
+
+            # Tab per gli idrometri
+            with data_tabs[2]:
+                st.write("Inserisci i livelli idrometrici per ogni ora (m)")
+
+                for feature_idx, feature in enumerate(hydro_features):
+                    st.write(f"### {feature}")
+
+                    # Aggiungiamo un modo per impostare un valore costante
+                    const_col1, const_col2 = st.columns([3, 1])
+                    with const_col1:
+                        const_value = st.number_input(f"Valore costante per {feature}", -1.0, 10.0, 0.0, 0.01, key=f"const_{feature_idx}")
+                    with const_col2:
+                        if st.button(f"Applica a tutte le ore", key=f"apply_const_{feature_idx}"):
+                            for h in range(INPUT_WINDOW):
+                                hydro_data[h, feature_idx] = const_value
+
+                    for row in range(num_rows):
+                        cols = st.columns(num_cols)
+                        for col in range(num_cols):
+                            hour_idx = row * num_cols + col
+                            if hour_idx < INPUT_WINDOW:
+                                with cols[col]:
+                                    # Usiamo il valore già calcolato se disponibile
+                                    current_value = hydro_data[hour_idx, feature_idx]
+                                    hydro_data[hour_idx, feature_idx] = st.number_input(
+                                        f"Ora {hour_idx}",
+                                        -1.0, 10.0, current_value, 0.01,
+                                        key=f"hydro_{feature_idx}_{hour_idx}"
+                                    )
+
+            # Componiamo i dati per la simulazione
+            rain_offset = 0
+            humidity_offset = len(rain_features)
+            hydro_offset = humidity_offset + len(humidity_feature)
+
+            for h in range(INPUT_WINDOW):
+                # Copiamo i dati di pioggia
+                for i in range(len(rain_features)):
+                    sim_data[h, rain_offset + i] = rain_data[h, i]
+
+                # Copiamo i dati di umidità
+                for i in range(len(humidity_feature)):
+                    sim_data[h, humidity_offset + i] = humidity_data[h, i]
+
+                # Copiamo i dati degli idrometri
+                for i in range(len(hydro_features)):
+                    sim_data[h, hydro_offset + i] = hydro_data[h, i]
+
+            # Visualizziamo un'anteprima dei dati
+            st.subheader("Anteprima dei dati inseriti")
+            preview_df = pd.DataFrame(sim_data, columns=feature_columns)
+            preview_df.index = [f"Ora {i}" for i in range(INPUT_WINDOW)]
+            st.dataframe(preview_df.round(2))
 
         else:  # Inserimento manuale completo
             st.subheader('Inserisci valori per ogni parametro')
@@ -391,7 +562,7 @@ elif page == 'Simulazione':
                     sim_data[:, offset + i] = value
 
         # Bottone per eseguire la simulazione
-        if st.button('Esegui simulazione'):
+        if st.button('Esegui simulazione', type="primary"):
             if model is None or scaler_features is None or scaler_targets is None:
                 st.error("Modello o scaler non caricati correttamente. Impossibile eseguire la simulazione.")
             else:
@@ -417,13 +588,40 @@ elif page == 'Simulazione':
 
                     # Grafici per ogni sensore
                     st.subheader('Grafici delle previsioni')
-                    figs = plot_predictions(predictions, hydro_features, OUTPUT_WINDOW, current_time)
 
-                    # Visualizzazione grafici
-                    for i, fig in enumerate(figs):
+                    # Creiamo una visualizzazione che mostri sia i dati inseriti che le previsioni
+                    for i, feature in enumerate(hydro_features):
+                        fig, ax = plt.subplots(figsize=(10, 6))
+
+                        # Indice per i dati degli idrometri nel sim_data
+                        hydro_idx = len(rain_features) + len(humidity_feature) + i
+
+                        # Dati storici (input)
+                        input_times = [current_time - timedelta(hours=INPUT_WINDOW-h) for h in range(INPUT_WINDOW)]
+                        ax.plot(input_times, sim_data[:, hydro_idx], 'b-', label='Dati inseriti')
+
+                        # Dati previsti (output)
+                        ax.plot(prediction_times, predictions[:, i], 'r-', label='Previsione')
+
+                        # Linea verticale per separare dati storici e previsione
+                        ax.axvline(x=current_time, color='black', linestyle='--')
+                        ax.annotate('Ora attuale', (current_time, ax.get_ylim()[0]),
+                                    xytext=(10, 10), textcoords='offset points')
+
+                        ax.set_title(f'Idrometro: {feature}')
+                        ax.set_xlabel('Data/Ora')
+                        ax.set_ylabel('Livello (m)')
+                        ax.legend()
+                        ax.grid(True)
+
+                        # Formattazione delle date sull'asse x
+                        plt.xticks(rotation=45)
+                        plt.tight_layout()
+
                         st.pyplot(fig)
-                        sensor_name = hydro_features[i].replace(' ', '_').replace('/', '_')
-                        st.markdown(get_image_download_link(fig, f"sim_{sensor_name}.png", f"il grafico di {hydro_features[i]}"), unsafe_allow_html=True)
+                        sensor_name = feature.replace(' ', '_').replace('/', '_')
+                        st.markdown(get_image_download_link(fig, f"sim_{sensor_name}.png", f"il grafico di {feature}"), unsafe_allow_html=True)
+
 
 elif page == 'Analisi Dati Storici':
     st.header('Analisi Dati Storici')
