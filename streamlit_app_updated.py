@@ -349,31 +349,33 @@ elif page == 'Simulazione':
             ['Modifica dati recenti', 'Inserisci dati orari', 'Inserisci manualmente tutti i valori']
         )
 
+        # Inizializzazione di sim_data fuori dai blocchi condizionali
+        sim_data = np.zeros((INPUT_WINDOW, len(feature_columns)))
+        rain_data = np.zeros((INPUT_WINDOW, len(rain_features)))
+        humidity_data = np.zeros((INPUT_WINDOW, len(humidity_feature)))
+        hydro_data = np.zeros((INPUT_WINDOW, len(hydro_features)))
+
         if sim_method == 'Modifica dati recenti':
             # Prendiamo i dati recenti come base
             recent_data = df.iloc[-INPUT_WINDOW:][feature_columns].copy()
+            sim_data = recent_data.values # Inizializza sim_data con dati recenti
 
             # Permettiamo all'utente di modificare la pioggia
             st.subheader('Modifica valori di pioggia')
             rain_multiplier = st.slider('Fattore moltiplicativo pioggia', 0.0, 5.0, 1.0, 0.1)
 
             # Modifichiamo i valori di pioggia
-            for col in rain_features:
-                recent_data[col] = recent_data[col] * rain_multiplier
+            for i, col in enumerate(rain_features):
+                sim_data[:, i] = recent_data[col] * rain_multiplier
 
             # Permettiamo all'utente di modificare l'umidità
             st.subheader('Modifica valori di umidità')
             humidity_value = st.slider('Umidità (%)', 0.0, 100.0, float(recent_data[humidity_feature[0]].mean()), 0.5)
-            recent_data[humidity_feature[0]] = humidity_value
+            sim_data[:, len(rain_features)] = humidity_value
 
-            # Prendiamo i valori modificati
-            sim_data = recent_data.values
 
         elif sim_method == 'Inserisci dati orari':
             st.subheader('Inserisci dati per ogni ora (24 ore precedenti)')
-
-            # Creiamo un dataframe vuoto per i dati della simulazione
-            sim_data = np.zeros((INPUT_WINDOW, len(feature_columns)))
 
             # Opzioni per la compilazione rapida
             st.subheader("Strumenti di compilazione rapida")
@@ -421,10 +423,6 @@ elif page == 'Simulazione':
             # Creiamo tabs per separare i diversi tipi di dati
             data_tabs = st.tabs(["Pioggia", "Umidità", "Idrometri"])
 
-            # Prepariamo arrays per memorizzare i valori
-            rain_data = np.zeros((INPUT_WINDOW, len(rain_features)))
-            humidity_data = np.zeros((INPUT_WINDOW, len(humidity_feature)))
-            hydro_data = np.zeros((INPUT_WINDOW, len(hydro_features)))
 
             # Se l'utente ha cliccato su applica scenario di pioggia
             if apply_rain:
@@ -533,33 +531,32 @@ elif page == 'Simulazione':
                 for i in range(len(hydro_features)):
                     sim_data[h, hydro_offset + i] = hydro_data[h, i]
 
-            # Visualizziamo un'anteprima dei dati
-            st.subheader("Anteprima dei dati inseriti")
-            preview_df = pd.DataFrame(sim_data, columns=feature_columns)
-            preview_df.index = [f"Ora {i}" for i in range(INPUT_WINDOW)]
-            st.dataframe(preview_df.round(2))
 
         else:  # Inserimento manuale completo
             st.subheader('Inserisci valori per ogni parametro')
 
-            # Creiamo un dataframe vuoto per i dati della simulazione
-            sim_data = np.zeros((INPUT_WINDOW, len(feature_columns)))
-
             # Raggruppiamo i controlli per tipo di sensore
             with st.expander("Imposta valori di pioggia"):
                 for i, feature in enumerate(rain_features):
-                    value = st.number_input(f'{feature} (mm)', 0.0, 100.0, 0.0, 0.5)
+                    value = st.number_input(f'{feature} (mm)', 0.0, 100.0, 0.0, 0.5, key=f"manual_rain_{feature}")
                     sim_data[:, i] = value
 
             with st.expander("Imposta valore di umidità"):
-                value = st.number_input(f'{humidity_feature[0]} (%)', 0.0, 100.0, 50.0, 0.5)
+                value = st.number_input(f'{humidity_feature[0]} (%)', 0.0, 100.0, 50.0, 0.5, key=f"manual_humidity")
                 sim_data[:, len(rain_features)] = value
 
             with st.expander("Imposta livelli idrometrici"):
                 offset = len(rain_features) + len(humidity_feature)
                 for i, feature in enumerate(hydro_features):
-                    value = st.number_input(f'{feature} (m)', -1.0, 10.0, 0.0, 0.01)
+                    value = st.number_input(f'{feature} (m)', -1.0, 10.0, 0.0, 0.01, key=f"manual_hydro_{feature}")
                     sim_data[:, offset + i] = value
+
+        # Visualizziamo un'anteprima dei dati solo per 'Inserisci dati orari'
+        if sim_method == 'Inserisci dati orari':
+            st.subheader("Anteprima dei dati inseriti")
+            preview_df = pd.DataFrame(sim_data, columns=feature_columns)
+            preview_df.index = [f"Ora {i}" for i in range(INPUT_WINDOW)]
+            st.dataframe(preview_df.round(2))
 
         # Bottone per eseguire la simulazione
         if st.button('Esegui simulazione', type="primary"):
