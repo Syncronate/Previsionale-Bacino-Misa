@@ -345,7 +345,7 @@ elif page == 'Simulazione':
         # Opzioni per la simulazione
         sim_method = st.radio(
             "Metodo di simulazione",
-            ['Modifica dati recenti', 'Inserisci manualmente tutti i valori']
+            ['Modifica dati recenti', 'Inserisci manualmente tutti i valori', 'Inserisci manualmente i valori per ogni ora']
         )
 
         if sim_method == 'Modifica dati recenti':
@@ -368,8 +368,8 @@ elif page == 'Simulazione':
             # Prendiamo i valori modificati
             sim_data = recent_data.values
 
-        else:  # Inserimento manuale completo
-            st.subheader('Inserisci valori per ogni parametro')
+        elif sim_method == 'Inserisci manualmente tutti i valori':  # Inserimento manuale completo (valore singolo ripetuto)
+            st.subheader('Inserisci valori per ogni parametro (valore singolo per tutte le ore)')
 
             # Creiamo un dataframe vuoto per i dati della simulazione
             sim_data = np.zeros((INPUT_WINDOW, len(feature_columns)))
@@ -389,6 +389,30 @@ elif page == 'Simulazione':
                 for i, feature in enumerate(hydro_features):
                     value = st.number_input(f'{feature} (m)', -1.0, 10.0, 0.0, 0.01)
                     sim_data[:, offset + i] = value
+
+        elif sim_method == 'Inserisci manualmente i valori per ogni ora': # Nuova modalità di simulazione
+            st.subheader('Inserisci valori per ogni ora (per tutte le 24 ore)')
+            sim_data = np.zeros((INPUT_WINDOW, len(feature_columns)))
+
+            for hour in range(INPUT_WINDOW):
+                with st.expander(f"Ora {hour+1}"):
+                    col_rain, col_humidity, col_hydro = st.columns(3)
+                    with col_rain:
+                        st.markdown("**Pioggia**")
+                        for i, feature in enumerate(rain_features):
+                            value = st.number_input(f'{feature} (mm)', 0.0, 100.0, 0.0, 0.5, key=f'rain_{hour}_{i}')
+                            sim_data[hour, i] = value
+                    with col_humidity:
+                        st.markdown("**Umidità**")
+                        value = st.number_input(f'{humidity_feature[0]} (%)', 0.0, 100.0, 50.0, 0.5, key=f'humidity_{hour}_0')
+                        sim_data[hour, len(rain_features)] = value
+                    with col_hydro:
+                        st.markdown("**Livelli Idrometrici**")
+                        offset = len(rain_features) + len(humidity_feature)
+                        for i, feature in enumerate(hydro_features):
+                            value = st.number_input(f'{feature} (m)', -1.0, 10.0, 0.0, 0.01, key=f'hydro_{hour}_{i}')
+                            sim_data[hour, offset + i] = value
+
 
         # Bottone per eseguire la simulazione
         if st.button('Esegui simulazione'):
