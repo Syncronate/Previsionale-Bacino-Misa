@@ -83,12 +83,12 @@ class HydroLSTM(nn.Module):
 
 # Funzione per caricare il modello addestrato
 @st.cache_resource
-def load_model(model_path, input_size, hidden_size, output_size, output_window, num_layers=2):
+def load_model(model_path, input_size, hidden_size, output_size, output_window, num_layers=2, dropout=0.2):
     # Impostazione del device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # Creazione del modello
-    model = HydroLSTM(input_size, hidden_size, output_size, output_window, num_layers).to(device)
+    # Creazione del modello **CON I PARAMETRI SPECIFICATI**
+    model = HydroLSTM(input_size, hidden_size, output_size, output_window, num_layers, dropout).to(device)
 
     # Caricamento dei pesi del modello
     try:
@@ -143,13 +143,13 @@ def prepare_training_data(df, feature_columns, target_columns, input_window=INPU
 # Funzione per addestrare il modello
 def train_model(
     X_train, y_train, X_val, y_val, input_size, output_size, output_window,
-    hidden_size=128, num_layers=2, epochs=50, batch_size=32, learning_rate=0.001
+    hidden_size=128, num_layers=2, epochs=50, batch_size=32, learning_rate=0.001, dropout=0.2
 ):
     # Impostazione del device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # Creazione del modello
-    model = HydroLSTM(input_size, hidden_size, output_size, output_window, num_layers).to(device)
+    model = HydroLSTM(input_size, hidden_size, output_size, output_window, num_layers, dropout).to(device)
 
     # Preparazione dei dataset
     train_dataset = TimeSeriesDataset(X_train, y_train)
@@ -352,6 +352,10 @@ if use_demo_files:
     MODEL_PATH = 'best_hydro_model.pth'  # Sostituisci con il percorso corretto
     SCALER_FEATURES_PATH = 'scaler_features.joblib'  # Sostituisci con il percorso corretto
     SCALER_TARGETS_PATH = 'scaler_targets.joblib'  # Sostituisci con il percorso corretto
+    # Parametri del modello DEMO
+    DEMO_HIDDEN_SIZE = 128
+    DEMO_NUM_LAYERS = 2
+    DEMO_DROPOUT = 0.2
 else:
     # Caricamento dei file dall'utente
     st.sidebar.subheader('Carica i tuoi file')
@@ -360,10 +364,17 @@ else:
     scaler_features_file = st.sidebar.file_uploader('File scaler features (.joblib)', type=['joblib'])
     scaler_targets_file = st.sidebar.file_uploader('File scaler targets (.joblib)', type=['joblib'])
 
+    # Configurazione parametri modello
+    st.sidebar.subheader('Configurazione Modello')
+    hidden_size = st.sidebar.number_input("Dimensione hidden layer", min_value=16, max_value=512, value=128, step=16)
+    num_layers = st.sidebar.number_input("Numero di layer LSTM", min_value=1, max_value=5, value=2)
+    dropout = st.sidebar.slider("Dropout", 0.0, 0.5, 0.2, 0.05)
+
+
     # Controllo se tutti i file sono stati caricati
-    if not (data_file and model_file and scaler_features_file and scaler_targets_file):
+    if not use_demo_files and not (data_file and model_file and scaler_features_file and scaler_targets_file):
         st.sidebar.warning('Carica tutti i file necessari per procedere')
-    else:
+    elif not use_demo_files:
         # Salvataggio temporaneo dei file caricati
         DATA_PATH = data_file
         MODEL_PATH = model_file
@@ -415,18 +426,19 @@ if use_demo_files or (data_file and model_file and scaler_features_file and scal
     try:
         # Calcola input_size correttamente in base alle feature columns
         input_size = len(feature_columns)
-        hidden_size = 128  # Parametro configurabile
 
         if use_demo_files:
             demo_target_columns = hydro_features[:4] # Use only first 4 for demo model
             output_size = len(demo_target_columns) # output_size = 4 for demo model
             target_columns = demo_target_columns # Update target_columns to be used in the app for demo mode
-            model, device = load_model(MODEL_PATH, input_size, hidden_size, output_size, OUTPUT_WINDOW) # Pass demo_output_size
+            # Usa parametri DEMO
+            model, device = load_model(MODEL_PATH, input_size, DEMO_HIDDEN_SIZE, output_size, OUTPUT_WINDOW, DEMO_NUM_LAYERS, DEMO_DROPOUT)
             scaler_features, scaler_targets = load_scalers(SCALER_FEATURES_PATH, SCALER_TARGETS_PATH)
         else:
             target_columns = hydro_features # Use all 5 hydro features for user uploaded model
             output_size = len(target_columns) # output_size = 5 for user-uploaded model
-            model, device = load_model(model_file, input_size, hidden_size, output_size, OUTPUT_WINDOW)
+            # Usa parametri configurati dall'utente
+            model, device = load_model(model_file, input_size, hidden_size, output_size, OUTPUT_WINDOW, num_layers, dropout)
             scaler_features, scaler_targets = load_scalers(scaler_features_file, scaler_targets_file)
 
         if model is not None and scaler_features is not None and scaler_targets is not None:
@@ -1136,8 +1148,9 @@ elif page == 'Allenamento Modello':
 
                 with col2:
                     # Parametri del modello
-                    hidden_size = st.number_input("Dimensione hidden layer", min_value=16, max_value=512, value=128, step=16)
-                    num_layers = st.number_input("Numero di layer", min_value=1, max_value=5, value=2)
+                    hidden_size_train = st.number_input("Dimensione hidden layer", min_value=16, max_value=512, value=128, step=16)
+                    num_layers_train = st.number_input("Numero di layer", min_value=1, max_value=5, value=2)
+                    dropout_train = st.slider("Dropout", 0.0, 0.5, 0.2, 0.05, key="dropout_train_slider") # chiave univoca per slider dropout in training
 
                     # Parametri dell'addestramento
                     learning_rate = st.number_input("Learning rate", min_value=0.0001, max_value=0.1, value=0.001, format="%.4f")
@@ -1175,7 +1188,7 @@ elif page == 'Allenamento Modello':
                 model, train_losses, val_losses = train_model(
                     X_train, y_train, X_val, y_val,
                     input_size, output_size, output_window,
-                    hidden_size, num_layers, epochs, batch_size, learning_rate
+                    hidden_size_train, num_layers_train, epochs, batch_size, learning_rate, dropout_train
                 )
 
                 # Visualizzazione dei risultati
@@ -1221,8 +1234,9 @@ elif page == 'Allenamento Modello':
                     "Tipo di modello": "LSTM",
                     "Input window": input_window,
                     "Output window": output_window,
-                    "Hidden size": hidden_size,
-                    "Num layers": num_layers,
+                    "Hidden size": hidden_size_train,
+                    "Num layers": num_layers_train,
+                    "Dropout": dropout_train,
                     "Sensori previsti": ", ".join(selected_targets),
                     "Data di addestramento": datetime.now().strftime("%d/%m/%Y %H:%M")
                 }
