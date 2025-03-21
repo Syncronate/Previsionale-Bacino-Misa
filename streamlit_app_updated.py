@@ -6,12 +6,20 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import torch.nn as nn
 from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 import os
 import io
 import base64
 from datetime import datetime, timedelta
 import joblib
 import math
+import tempfile
+import zipfile
+import time
+import altair as alt
+
+# Impostare la pagina
+st.set_page_config(page_title="Modello previsionale idrologico", layout="wide")
 
 # Ripristino delle classi e funzioni dal modello originale
 class HydroLSTM(nn.Module):
@@ -52,20 +60,17 @@ class HydroLSTM(nn.Module):
 
 # Funzione per caricare il modello addestrato
 @st.cache_resource
-def load_model(model_path, input_size, output_size, output_window):
-    # Definizione delle costanti
-    HIDDEN_SIZE = 128
-    NUM_LAYERS = 2
+def load_model(model_path, input_size, output_size, output_window, hidden_size, num_layers):
     # Impostazione del device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     # Creazione del modello
-    model = HydroLSTM(input_size, HIDDEN_SIZE, output_size, output_window, NUM_LAYERS).to(device)
+    model = HydroLSTM(input_size, hidden_size, output_size, output_window, num_layers).to(device)
     # Caricamento dei pesi del modello
     try:
         model.load_state_dict(torch.load(model_path, map_location=device))
     except Exception as e:
         st.error(f"Errore durante il caricamento dei pesi del modello: {e}")
-        return None, device # Return None model and device
+        return None, device
     model.eval()
     return model, device
 
@@ -78,7 +83,7 @@ def load_scalers(scaler_features_path, scaler_targets_path):
         return scaler_features, scaler_targets
     except Exception as e:
         st.error(f"Errore durante il caricamento degli scaler: {e}")
-        return None, None # Return None scalers
+        return None, None
 
 # Funzione per fare previsioni
 def predict(model, input_data, scaler_features, scaler_targets, hydro_features, device, output_window):
@@ -115,50 +120,6 @@ def predict(model, input_data, scaler_features, scaler_targets, hydro_features, 
 
     return predictions
 
-# Funzione per plot dei risultati
-def plot_predictions(predictions, hydro_features, output_window, start_time=None):
-    figures = []
-
-    # Per ogni sensore idrometrico
-    for i, sensor_name in enumerate(hydro_features):
-        fig, ax = plt.subplots(figsize=(10, 5))
-
-        # Creazione dell'asse x per le ore future
-        if start_time:
-            hours = [start_time + timedelta(hours=h) for h in range(output_window)]
-            ax.plot(hours, predictions[:, i], marker='o', linestyle='-', label=f'Previsione {sensor_name}')
-            plt.gcf().autofmt_xdate()
-        else:
-            hours = np.arange(output_window)
-            ax.plot(hours, predictions[:, i], marker='o', linestyle='-', label=f'Previsione {sensor_name}')
-            ax.set_xlabel('Ore future')
-
-        ax.set_title(f'Previsione - {sensor_name}')
-        ax.set_ylabel('Livello idrometrico [m]')
-        ax.legend()
-        ax.grid(True)
-        plt.tight_layout()
-
-        figures.append(fig)
-
-    return figures
-
-# Funzione per ottenere un link di download per un file
-def get_table_download_link(df):
-    """Genera un link per scaricare il dataframe come file CSV"""
-    csv = df.to_csv(index=False)
-    b64 = base64.b64encode(csv.encode()).decode()
-    return f'<a href="data:file/csv;base64,{b64}" download="previsioni.csv">Scarica i dati CSV</a>'
-
-# Funzione per scaricare grafici
-def get_image_download_link(fig, filename, text):
-    """Genera un link per scaricare il grafico come immagine"""
-    buf = io.BytesIO()
-    fig.savefig(buf, format='png')
-    buf.seek(0)
-    b64 = base64.b64encode(buf.getvalue()).decode()
-    return f'<a href="data:image/png;base64,{b64}" download="{filename}">Scarica {text}</a>'
-
 # --- FUNZIONE modifica_modello_previsionale() AGGIORNATA per includere lo storico di Bettolelle ---
 def modifica_modello_previsionale():
     # Target: idrometro di Bettolelle
@@ -172,791 +133,544 @@ def modifica_modello_previsionale():
     def get_input_features(df):
         # Ottieni tutte le colonne con prefisso "Cumulata Sensore" (tutte le cumulate)
         cumulate_columns = [col for col in df.columns if col.startswith('Cumulata Sensore')]
-
         # Ottieni tutte le colonne con prefisso "Umidita'" (tutti i sensori di umidità)
         umidita_columns = [col for col in df.columns if col.startswith('Umidita\' Sensore')]
-
         # Ottieni tutte le colonne con prefisso "Livello Idrometrico Sensore" eccetto Ponte Garibaldi
         # MA INCLUDENDO Bettolelle, che adesso sarà sia input che target
         idrometro_columns = [col for col in df.columns if col.startswith('Livello Idrometrico Sensore')
                             and col != ponte_garibaldi_id_name]
-
         # Combinazione di tutte le colonne di input
         input_features_mod = cumulate_columns + umidita_columns + idrometro_columns
-
         return input_features_mod
 
-    # Modifica della funzione di preparazione dati per utilizzare queste nuove feature
-    def prepare_training_data_modificato(df_train, val_split):
-        # Ottieni le feature di input (ora include Bettolelle)
-        feature_columns_mod = get_input_features(df_train)
+    return get_input_features, target_features_mod
 
-        # Creazione delle sequenze di input (X) e output (y)
-        X, y = [], []
+# Funzione per preparare i dati (modificata)
+def prepare_training_data(df, input_window, output_window, val_split, test_split):
+    # Ottieni le funzioni per la preparazione dei dati modificati
+    get_input_features_func, target_features_mod = modifica_modello_previsionale()
+    # Feature di input (include Bettolelle)
+    feature_columns = get_input_features_func(df)
+    # Creazione delle sequenze di input (X) e output (y)
+    X, y = [], []
+    for i in range(len(df) - input_window - output_window + 1):
+        # X include tutte le feature, compreso lo storico di Bettolelle
+        X.append(df.iloc[i:i+input_window][feature_columns].values)
+        # y contiene solo Bettolelle per le previsioni future
+        y.append(df.iloc[i+input_window:i+input_window+output_window][target_features_mod].values)
+    X = np.array(X)
+    y = np.array(y)
 
-        for i in range(len(df_train) - INPUT_WINDOW - OUTPUT_WINDOW + 1):
-            # X include tutte le feature, compreso lo storico di Bettolelle
-            X.append(df_train.iloc[i:i+INPUT_WINDOW][feature_columns_mod].values)
-            # y contiene solo Bettolelle per le previsioni future
-            y.append(df_train.iloc[i+INPUT_WINDOW:i+INPUT_WINDOW+OUTPUT_WINDOW][target_features_mod].values)
+    # Normalizzazione dei dati
+    scaler_features = MinMaxScaler()
+    scaler_targets = MinMaxScaler()
 
-        X = np.array(X)
-        y = np.array(y)
+    X_flat = X.reshape(-1, X.shape[-1])
+    y_flat = y.reshape(-1, y.shape[-1])
 
-        # Normalizzazione dei dati
-        scaler_features_train = MinMaxScaler()
-        scaler_targets_train = MinMaxScaler()
+    X_scaled_flat = scaler_features.fit_transform(X_flat)
+    y_scaled_flat = scaler_targets.fit_transform(y_flat)
 
-        X_flat = X.reshape(-1, X.shape[-1])
-        y_flat = y.reshape(-1, y.shape[-1])
+    X_scaled = X_scaled_flat.reshape(X.shape)
+    y_scaled = y_scaled_flat.reshape(y.shape)
 
-        X_scaled_flat = scaler_features_train.fit_transform(X_flat)
-        y_scaled_flat = scaler_targets_train.fit_transform(y_flat)
+    # Divisione in set di addestramento, validazione e test
+    train_end_idx = int(len(X_scaled) * (1 - (val_split + test_split)/100))
+    val_end_idx = int(len(X_scaled) * (1 - test_split/100))
 
-        X_scaled = X_scaled_flat.reshape(X.shape)
-        y_scaled = y_scaled_flat.reshape(y.shape)
+    X_train = X_scaled[:train_end_idx]
+    y_train = y_scaled[:train_end_idx]
+    X_val = X_scaled[train_end_idx:val_end_idx]
+    y_val = y_scaled[train_end_idx:val_end_idx]
+    X_test = X_scaled[val_end_idx:]
+    y_test = y_scaled[val_end_idx:]
 
-        # Divisione in set di addestramento e validazione
-        split_idx = int(len(X_scaled) * (1 - val_split/100))
-        X_train = X_scaled[:split_idx]
-        y_train = y_scaled[:split_idx]
-        X_val = X_scaled[split_idx:]
-        y_val = y_scaled[split_idx:]
+    # Manteniamo anche i dati non scalati per il test set
+    X_test_unscaled = X[val_end_idx:]
+    y_test_unscaled = y[val_end_idx:]
 
-        return X_train, y_train, X_val, y_val, scaler_features_train, scaler_targets_train, feature_columns_mod, target_features_mod
+    return (X_train, y_train, X_val, y_val, X_test, y_test, X_test_unscaled, y_test_unscaled,
+            scaler_features, scaler_targets, feature_columns, target_features_mod)
 
-    return get_input_features, prepare_training_data_modificato, target_features_mod
+# Funzione per creare link di download per un file
+def get_download_link(file_path, file_name, text):
+    with open(file_path, "rb") as file:
+        bytes_data = file.read()
+    b64 = base64.b64encode(bytes_data).decode()
+    href = f'<a href="data:file/zip;base64,{b64}" download="{file_name}">{text}</a>'
+    return href
 
-# Ottieni le funzioni per la preparazione dei dati modificati
-get_input_features_func, prepare_training_data_modificato_func, target_features_modificato = modifica_modello_previsionale()
+# Funzione per creare un file zip con tutti i file del modello
+def create_model_zip(model_path, scaler_features_path, scaler_targets_path, metadata_path=None):
+    # Creiamo un file temporaneo
+    temp_zip = tempfile.NamedTemporaryFile(delete=False, suffix='.zip')
+    temp_zip.close()
 
-# --- FINE FUNZIONE modifica_modello_previsionale() ---
+    # Creiamo lo zip
+    with zipfile.ZipFile(temp_zip.name, 'w') as zipf:
+        zipf.write(model_path, arcname=os.path.basename(model_path))
+        zipf.write(scaler_features_path, arcname=os.path.basename(scaler_features_path))
+        zipf.write(scaler_targets_path, arcname=os.path.basename(scaler_targets_path))
+        if metadata_path:
+            zipf.write(metadata_path, arcname=os.path.basename(metadata_path))
 
+    return temp_zip.name
 
-# Titolo dell'app
-st.title('Dashboard Modello Predittivo Idrologico')
+# Funzione per valutazione e visualizzazione delle previsioni sul test set
+def evaluate_model(model, X_test, y_test, X_test_unscaled, y_test_unscaled, scaler_targets, target_features, device):
+    model.eval()
+    y_pred_scaled = []
 
-# Sidebar per le opzioni
-st.sidebar.header('Impostazioni')
+    with torch.no_grad():
+        for i in range(len(X_test)):
+            input_tensor = torch.FloatTensor(X_test[i:i+1]).to(device)
+            output = model(input_tensor)
+            y_pred_scaled.append(output.cpu().numpy().squeeze())
 
-# Opzione per caricare i propri file o usare quelli demo
-use_demo_files = st.sidebar.checkbox('Usa file di esempio', value=True)
+    y_pred_scaled = np.array(y_pred_scaled)
 
-if use_demo_files:
-    # Qui dovresti fornire percorsi ai file di esempio
-    DATA_PATH = 'dati_idro.csv'  # Sostituisci con il percorso corretto
-    MODEL_PATH = 'best_hydro_model.pth'  # Sostituisci con il percorso corretto
-    MODEL_PATH_MOD = 'best_hydro_model_bettolelle_with_history.pth' # Percorso modello modificato
-    SCALER_FEATURES_PATH = 'scaler_features.joblib'  # Sostituisci con il percorso corretto
-    SCALER_FEATURES_PATH_MOD = 'scaler_features_bettolelle_with_history.joblib' # Percorso scaler features modificato
-    SCALER_TARGETS_PATH = 'scaler_targets.joblib'  # Sostituisci con il percorso corretto
-    SCALER_TARGETS_PATH_MOD = 'scaler_targets_bettolelle_with_history.joblib' # Percorso scaler targets modificato
-else:
-    # Caricamento dei file dall'utente
-    st.sidebar.subheader('Carica i tuoi file')
-    data_file = st.sidebar.file_uploader('File CSV con i dati storici', type=['csv'])
-    model_file = st.sidebar.file_uploader('File del modello originale (.pth)', type=['pth'])
-    model_file_mod = st.sidebar.file_uploader('File del modello Bettolelle (.pth)', type=['pth']) # File modello modificato
-    scaler_features_file = st.sidebar.file_uploader('File scaler features originale (.joblib)', type=['joblib'])
-    scaler_features_file_mod = st.sidebar.file_uploader('File scaler features Bettolelle (.joblib)', type=['joblib']) # File scaler features modificato
-    scaler_targets_file = st.sidebar.file_uploader('File scaler targets originale (.joblib)', type=['joblib'])
-    scaler_targets_file_mod = st.sidebar.file_uploader('File scaler targets Bettolelle (.joblib)', type=['joblib']) # File scaler targets modificato
+    # Reshape per la denormalizzazione
+    y_pred_scaled_flat = y_pred_scaled.reshape(-1, y_pred_scaled.shape[-1])
+    y_test_flat = y_test.reshape(-1, y_test.shape[-1])
 
-    # Controllo se tutti i file sono stati caricati
-    if not use_demo_files:
-        if not (data_file and model_file and scaler_features_file and scaler_targets_file and model_file_mod and scaler_features_file_mod and scaler_targets_file_mod):
-            st.sidebar.warning('Carica tutti i file necessari per procedere')
+    # Denormalizzazione
+    y_pred = scaler_targets.inverse_transform(y_pred_scaled_flat).reshape(y_pred_scaled.shape)
+    y_true = scaler_targets.inverse_transform(y_test_flat).reshape(y_test.shape)
+
+    # Calcolo metriche (MSE, MAE, R2)
+    mse = mean_squared_error(y_true.flatten(), y_pred.flatten())
+    rmse = np.sqrt(mse)
+    mae = mean_absolute_error(y_true.flatten(), y_pred.flatten())
+    r2 = r2_score(y_true.flatten(), y_pred.flatten())
+
+    # Preparazione dei dati per la visualizzazione
+    results = {
+        "metriche": {
+            "MSE": mse,
+            "RMSE": rmse,
+            "MAE": mae,
+            "R²": r2
+        },
+        "previsioni": y_pred,
+        "valori_reali": y_true
+    }
+
+    return results
+
+# Funzione per visualizzare le previsioni sul test set
+def plot_test_predictions(results, target_features, output_window, test_size=10):
+    previsioni = results["previsioni"]
+    valori_reali = results["valori_reali"]
+
+    # Scegliamo un sottoinsieme di esempi da visualizzare
+    num_examples = min(test_size, len(previsioni))
+    indices = np.random.choice(len(previsioni), num_examples, replace=False)
+
+    fig, axes = plt.subplots(num_examples, 1, figsize=(12, num_examples * 4), sharex=True)
+    if num_examples == 1:
+        axes = [axes]
+
+    for i, idx in enumerate(indices):
+        timesteps = np.arange(output_window)
+        axes[i].plot(timesteps, valori_reali[idx, :, 0], 'b-', label='Valore reale')
+        axes[i].plot(timesteps, previsioni[idx, :, 0], 'r--', label='Previsione')
+        axes[i].set_title(f'Esempio {idx+1}: {target_features[0]}')
+        axes[i].set_ylabel('Livello (m)')
+        axes[i].set_xlabel('Ore future')
+        axes[i].legend()
+        axes[i].grid(True)
+
+    plt.tight_layout()
+    return fig
+
+# Funzione principale per l'allenamento del modello
+def train_model(df, params, train_progress_bar, train_progress_text, train_chart_placeholder):
+    # Estrazione dei parametri
+    input_window = params["input_window"]
+    output_window = params["output_window"]
+    val_split = params["val_split"]
+    test_split = params["test_split"]
+    hidden_size = params["hidden_size"]
+    num_layers = params["num_layers"]
+    dropout = params["dropout"]
+    batch_size = params["batch_size"]
+    learning_rate = params["learning_rate"]
+    num_epochs = params["num_epochs"]
+    patience = params["patience"]
+    model_name = params["model_name"]
+
+    # Preparazione dei dati
+    (X_train, y_train, X_val, y_val, X_test, y_test, X_test_unscaled, y_test_unscaled,
+     scaler_features, scaler_targets, feature_columns, target_features) = prepare_training_data(
+        df, input_window, output_window, val_split, test_split)
+
+    # Calcolo dimensioni di input e output
+    input_size = X_train.shape[-1]
+    output_size = y_train.shape[-1]
+
+    # Inizializzazione del modello
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = HydroLSTM(input_size, hidden_size, output_size, output_window, num_layers=num_layers, dropout=dropout).to(device)
+
+    # Definizione della loss function e dell'optimizer
+    criterion = nn.MSELoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+
+    # Early stopping
+    best_val_loss = float('inf')
+    patience_counter = 0
+    best_model_state = None
+
+    # Training loop
+    history = {'train_loss': [], 'val_loss': [], 'epoch': []}
+    train_progress_text.text(f"Inizializzazione modello su {device}...")
+
+    # Inizializzazione del grafico per monitoraggio real-time
+    train_chart_data = pd.DataFrame({
+        'Epoca': [],
+        'Loss': [],
+        'Tipo': []
+    })
+
+    # Creazione del grafico iniziale
+    chart = alt.Chart(train_chart_data).mark_line().encode(
+        x='Epoca',
+        y='Loss',
+        color='Tipo',
+        tooltip=['Epoca', 'Loss', 'Tipo']
+    ).interactive()
+
+    train_chart = train_chart_placeholder.altair_chart(chart, use_container_width=True)
+
+    # Ciclo di training
+    for epoch in range(num_epochs):
+        model.train()
+        train_loss = 0
+
+        train_progress_text.text(f"Epoch {epoch+1}/{num_epochs} - Training...")
+        num_train_batches = (len(X_train) // batch_size) + (1 if len(X_train) % batch_size != 0 else 0)
+        batch_progress = st.progress(0.0)
+
+        for batch_idx in range(0, len(X_train), batch_size):
+            batch_progress.progress(batch_idx / len(X_train))
+            X_batch = torch.FloatTensor(X_train[batch_idx:batch_idx+batch_size]).to(device)
+            y_batch = torch.FloatTensor(y_train[batch_idx:batch_size+batch_size]).to(device)
+            optimizer.zero_grad()
+            output = model(X_batch)
+            loss = criterion(output, y_batch)
+            loss.backward()
+            optimizer.step()
+            train_loss += loss.item()
+
+        avg_train_loss = train_loss / num_train_batches
+
+        # Validazione
+        model.eval()
+        val_loss = 0
+        train_progress_text.text(f"Epoch {epoch+1}/{num_epochs} - Validazione...")
+        num_val_batches = (len(X_val) // batch_size) + (1 if len(X_val) % batch_size != 0 else 0)
+
+        with torch.no_grad():
+            for batch_idx in range(0, len(X_val), batch_size):
+                X_batch_val = torch.FloatTensor(X_val[batch_idx:batch_idx+batch_size]).to(device)
+                y_batch_val = torch.FloatTensor(y_val[batch_idx:batch_batch+batch_size]).to(device)
+                output_val = model(X_batch_val)
+                loss_val = criterion(output_val, y_batch_val)
+                val_loss += loss_val.item()
+
+        avg_val_loss = val_loss / num_val_batches
+
+        # Aggiornamento dello storico
+        history['train_loss'].append(avg_train_loss)
+        history['val_loss'].append(avg_val_loss)
+        history['epoch'].append(epoch+1)
+
+        # Aggiornamento del grafico in tempo reale
+        new_data = pd.DataFrame({
+            'Epoca': [epoch+1, epoch+1],
+            'Loss': [avg_train_loss, avg_val_loss],
+            'Tipo': ['Train', 'Validation']
+        })
+        train_chart_data = pd.concat([train_chart_data, new_data])
+        chart = alt.Chart(train_chart_data).mark_line().encode(
+            x='Epoca',
+            y=alt.Y('Loss', scale=alt.Scale(type='log')),
+            color='Tipo',
+            tooltip=['Epoca', 'Loss', 'Tipo']
+        ).properties(
+            title='Andamento Training e Validation Loss'
+        ).interactive()
+        train_chart.altair_chart(chart, use_container_width=True)
+
+        # Early stopping
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            best_model_state = model.state_dict().copy()
+            patience_counter = 0
         else:
-            pass
+            patience_counter += 1
+            if patience_counter >= patience:
+                train_progress_text.text(f"Early stopping all'epoca {epoch+1}")
+                break
 
-# Definizione delle costanti
-INPUT_WINDOW = 6 # MODIFICATO INPUT_WINDOW A 6 ORE
-OUTPUT_WINDOW = 6 # MODIFICATO OUTPUT_WINDOW A 6 ORE
+        train_progress_bar.progress((epoch + 1) / num_epochs)
+        train_progress_text.text(f"Epoca {epoch+1}/{num_epochs}, Train Loss: {avg_train_loss:.6f}, Val Loss: {avg_val_loss:.6f}")
 
-# Caricamento dei dati storici
-df = None # Initialize df to None
-try:
-    if use_demo_files:
-        df = pd.read_csv(DATA_PATH, sep=';', parse_dates=['Data e Ora'], decimal=',')
-        df['Data e Ora'] = pd.to_datetime(df['Data e Ora'], format='%d/%m/%Y %H:%M')
-    elif data_file is not None: # Check if data_file is loaded
-        df = pd.read_csv(data_file, sep=';', parse_dates=['Data e Ora'], decimal=',')
-        df['Data e Ora'] = pd.to_datetime(df['Data e Ora'], format='%d/%m/%Y %H:%M')
-    if df is not None:
-        st.sidebar.success(f'Dati caricati: {len(df)} righe')
-except Exception as e:
-    st.sidebar.error(f'Errore nel caricamento dei dati: {e}')
+    # Ripristino del miglior modello
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state)
 
+    # Salvataggio del modello e degli scaler
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    model_path = f'{model_name}_{timestamp}.pth'
+    scaler_features_path = f'scaler_features_{model_name}_{timestamp}.joblib'
+    scaler_targets_path = f'scaler_targets_{model_name}_{timestamp}.joblib'
 
-# Estrazione delle caratteristiche (originali - potremmo non usarle direttamente nella simulazione modificata)
-rain_features_original = [
-    'Cumulata Sensore 1295 (Arcevia)',
-    'Cumulata Sensore 2637 (Bettolelle)',
-    'Cumulata Sensore 2858 (Barbara)',
-    'Cumulata Sensore 2964 (Corinaldo)'
-]
+    # Salvataggio metadati
+    metadata = {
+        "input_window": input_window,
+        "output_window": output_window,
+        "hidden_size": hidden_size,
+        "num_layers": num_layers,
+        "input_size": input_size,
+        "output_size": output_size,
+        "feature_columns": feature_columns,
+        "target_features": target_features,
+        "val_loss": best_val_loss,
+        "training_date": timestamp
+    }
+    metadata_path = f'metadata_{model_name}_{timestamp}.joblib'
 
-humidity_feature_original = ['Umidita\' Sensore 3452 (Montemurello)']
+    # Salvataggio dei file
+    torch.save(model.state_dict(), model_path)
+    joblib.dump(scaler_features, scaler_features_path)
+    joblib.dump(scaler_targets, scaler_targets_path)
+    joblib.dump(metadata, metadata_path)
 
-hydro_features_original = [
-    'Livello Idrometrico Sensore 1008 [m] (Serra dei Conti)',
-    'Livello Idrometrico Sensore 1112 [m] (Bettolelle)',
-    'Livello Idrometrico Sensore 1283 [m] (Corinaldo/Nevola)',
-    'Livello Idrometrico Sensore 3072 [m] (Pianello di Ostra)',
-    'Livello Idrometrico Sensore 3405 [m] (Ponte Garibaldi)'
-]
+    train_progress_text.text(f"Modello salvato in: {model_path}")
 
-feature_columns_original = rain_features_original + humidity_feature_original + hydro_features_original
+    # Valutazione sul test set
+    test_results = evaluate_model(model, X_test, y_test, X_test_unscaled, y_test_unscaled,
+                                 scaler_targets, target_features, device)
 
-# Definisci le feature columns e hydro_features iniziali (prima della modifica)
-feature_columns = feature_columns_original
-hydro_features = hydro_features_original
+    # Creazione dello zip per download
+    zip_path = create_model_zip(model_path, scaler_features_path, scaler_targets_path, metadata_path)
 
-model = None
-scaler_features = None
-scaler_targets = None
+    return {
+        'model': model,
+        'device': device,
+        'scaler_features': scaler_features,
+        'scaler_targets': scaler_targets,
+        'feature_columns': feature_columns,
+        'target_features': target_features,
+        'history': history,
+        'test_results': test_results,
+        'model_path': model_path,
+        'scaler_features_path': scaler_features_path,
+        'scaler_targets_path': scaler_targets_path,
+        'metadata_path': metadata_path,
+        'zip_path': zip_path,
+        'metadata': metadata
+    }
 
-model_mod = None # Modello modificato
-scaler_features_mod = None # Scaler features modificato
-scaler_targets_mod = None # Scaler targets modificato
+# UI Principale
+def main():
+    st.title("App per Allenamento e Test di Modelli Previsionali Idrologici")
 
+    # Creazione di tabs
+    tab1, tab2, tab3 = st.tabs(["Allenamento Modello", "Test Modello", "Simulazione"])
 
-# Caricamento del modello e degli scaler SOLO se i file sono stati caricati o si usano quelli demo
-if use_demo_files or (data_file and model_file and scaler_features_file and scaler_targets_file):
-    try:
-        if use_demo_files:
-            model, device = load_model(MODEL_PATH, 8, 5, OUTPUT_WINDOW) # MODIFIED: input_size=8, output_size=5
-            scaler_features, scaler_targets = load_scalers(SCALER_FEATURES_PATH, SCALER_TARGETS_PATH)
-        else:
-            model_bytes = io.BytesIO(model_file.read())
-            model, device = load_model(model_bytes, 8, 5, OUTPUT_WINDOW) # MODIFIED: input_size=8, output_size=5
-            scaler_features, scaler_targets = load_scalers(scaler_features_file, scaler_targets_file)
+    with tab1:
+        st.header("Allenamento di un Nuovo Modello")
+        # Caricamento dati
+        uploaded_file = st.file_uploader("Carica il file CSV con i dati idrologici", type=["csv"])
+        if uploaded_file is not None:
+            try:
+                df = pd.read_csv(uploaded_file, sep=';', parse_dates=['Data e Ora'], decimal=',')
+                df['Data e Ora'] = pd.to_datetime(df['Data e Ora'], format='%d/%m/%Y %H:%M')
+                st.success(f"File caricato con successo. Righe: {len(df)}, Colonne: {len(df.columns)}")
+                st.subheader("Anteprima dei dati")
+                st.dataframe(df.head())
 
-        if model is not None and scaler_features is not None and scaler_targets is not None: # Check if loading was successful
-            st.sidebar.success('Modello originale e scaler caricati con successo')
-    except Exception as e:
-        st.sidebar.error(f'Errore nel caricamento del modello originale o degli scaler: {e}')
+                st.subheader("Parametri di Allenamento")
+                col1, col2 = st.columns(2)
+                with col1:
+                    input_window = st.slider("Finestra di input (ore)", 1, 24, 6, 1)
+                    output_window = st.slider("Finestra di output (ore)", 1, 24, 6, 1)
+                    val_split = st.slider("Percentuale validazione", 5, 30, 20, 1)
+                    test_split = st.slider("Percentuale test", 5, 30, 10, 1)
+                    hidden_size = st.select_slider("Dimensione hidden layer", options=[32, 64, 128, 256, 512], value=128)
+                with col2:
+                    num_layers = st.slider("Numero di layer LSTM", 1, 4, 2, 1)
+                    dropout = st.slider("Dropout", 0.0, 0.5, 0.2, 0.1)
+                    batch_size = st.select_slider("Batch size", options=[8, 16, 32, 64, 128], value=32)
+                    learning_rate = st.select_slider("Learning rate", options=[0.0001, 0.0005, 0.001, 0.005, 0.01], value=0.001)
+                    num_epochs = st.slider("Numero di epoche", 10, 500, 100, 10)
 
-# Caricamento del modello modificato e scaler
-if use_demo_files or (data_file and model_file_mod and scaler_features_file_mod and scaler_targets_file_mod):
-    try:
-        if use_demo_files:
-            model_mod, device = load_model(MODEL_PATH_MOD, 8, 1, OUTPUT_WINDOW) # Usa MODEL_PATH_MOD
-            scaler_features_mod, scaler_targets_mod = load_scalers(SCALER_FEATURES_PATH_MOD, SCALER_TARGETS_PATH_MOD) # Usa *_PATH_MOD
-        else:
-            model_bytes_mod = io.BytesIO(model_file_mod.read()) # Usa model_file_mod
-            model_mod, device = load_model(model_bytes_mod, 8, 1, OUTPUT_WINDOW) # Usa model_bytes_mod
-            scaler_features_mod, scaler_targets_mod = load_scalers(scaler_features_file_mod, scaler_targets_file_mod) # Usa *_file_mod
+                patience = st.slider("Patience per early stopping", 5, 50, 15, 1)
+                model_name = st.text_input("Nome del modello", "hydro_model")
 
-        if model_mod is not None and scaler_features_mod is not None and scaler_targets_mod is not None: # Check if loading was successful
-            st.sidebar.success('Modello Bettolelle e scaler caricati con successo')
-    except Exception as e:
-        st.sidebar.error(f'Errore nel caricamento del modello Bettolelle o degli scaler: {e}')
+                if st.button("Avvia Allenamento"):
+                    st.subheader("Progresso Allenamento")
+                    train_progress_bar = st.progress(0.0)
+                    train_progress_text = st.empty()
+                    st.subheader("Curve di Loss")
+                    train_chart_placeholder = st.empty()
 
+                    params = {
+                        "input_window": input_window,
+                        "output_window": output_window,
+                        "val_split": val_split,
+                        "test_split": test_split,
+                        "hidden_size": hidden_size,
+                        "num_layers": num_layers,
+                        "dropout": dropout,
+                        "batch_size": batch_size,
+                        "learning_rate": learning_rate,
+                        "num_epochs": num_epochs,
+                        "patience": patience,
+                        "model_name": model_name
+                    }
 
-# Menu principale
-st.sidebar.header('Menu')
-page = st.sidebar.radio('Scegli una funzionalità',
-                        ['Dashboard', 'Simulazione', 'Analisi Dati Storici', 'Allenamento Modello'])
+                    results = train_model(df, params, train_progress_bar, train_progress_text, train_chart_placeholder)
 
+                    st.subheader("Risultati dell'Allenamento")
+                    st.write("Metriche sul Test Set:")
+                    metrics = results['test_results']['metriche']
+                    col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+                    col_m1.metric("MSE", f"{metrics['MSE']:.6f}")
+                    col_m2.metric("RMSE", f"{metrics['RMSE']:.6f}")
+                    col_m3.metric("MAE", f"{metrics['MAE']:.6f}")
+                    col_m4.metric("R²", f"{metrics['R²']:.6f}")
 
-if df is not None: # Only calculate if df is loaded
-    feature_columns_mod = get_input_features_func(pd.DataFrame(columns=df.columns if df is not None else feature_columns_original)) # needed to have columns to pass
-else:
-    feature_columns_mod = get_input_features_func(pd.DataFrame(columns=feature_columns_original)) # needed to have columns to pass in case df is None
+                    st.subheader("Visualizzazione Previsioni sul Test Set")
+                    fig = plot_test_predictions(results['test_results'], results['target_features'], output_window)
+                    st.pyplot(fig)
 
+                    st.subheader("Download del Modello")
+                    download_link = get_download_link(results['zip_path'], os.path.basename(results['zip_path']), "Clicca qui per scaricare il modello")
+                    st.markdown(download_link, unsafe_allow_html=True)
+            except Exception as e:
+                st.error(f"Errore nel caricamento o nella lettura del file: {e}")
 
-if page == 'Dashboard':
-    st.header('Dashboard Idrologica')
+    with tab2:
+        st.header("Test del Modello Previsionale")
+        st.write("Carica il modello e gli scaler per eseguire delle previsioni su nuovi dati.")
+        model_file = st.file_uploader("Carica il file del modello (.pth)", type=["pth"])
+        scaler_features_file = st.file_uploader("Carica lo scaler delle feature (.joblib)", type=["joblib"])
+        scaler_targets_file = st.file_uploader("Carica lo scaler dei target (.joblib)", type=["joblib"])
 
-    if df is None or model is None or scaler_features is None or scaler_targets is None:
-        st.warning("Attenzione: Alcuni file necessari non sono stati caricati correttamente. Alcune funzionalità potrebbero non essere disponibili.")
-    else:
-        # Mostra ultimi dati disponibili
-        st.subheader('Ultimi dati disponibili')
-        last_data = df.iloc[-1]
-        last_date = last_data['Data e Ora']
+        if model_file is not None and scaler_features_file is not None and scaler_targets_file is not None:
+            # Salviamo temporaneamente i file caricati
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pth") as tmp_model:
+                tmp_model.write(model_file.read())
+                model_path = tmp_model.name
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".joblib") as tmp_scaler_features:
+                tmp_scaler_features.write(scaler_features_file.read())
+                scaler_features_path = tmp_scaler_features.name
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".joblib") as tmp_scaler_targets:
+                tmp_scaler_targets.write(scaler_targets_file.read())
+                scaler_targets_path = tmp_scaler_targets.name
 
-        # Formattazione dei dati per la visualizzazione
-        col1, col2 = st.columns(2)
+            # Parametri del modello (modifica in base al tuo training)
+            input_size = st.number_input("Input size", value=10, min_value=1)
+            hidden_size = st.number_input("Hidden size", value=128, min_value=1)
+            num_layers = st.number_input("Numero di layers", value=2, min_value=1)
+            output_window = st.number_input("Finestra di output (ore)", value=6, min_value=1)
+            output_size = 1  # Poiché il target è Bettolelle
 
-        with col1:
-            st.write(f"**Data e ora ultimo rilevamento:** {last_date}")
+            model, device = load_model(model_path, input_size, output_size, output_window, hidden_size, num_layers)
+            scaler_features, scaler_targets = load_scalers(scaler_features_path, scaler_targets_path)
 
-            # Ultimi dati idrologici
-            st.subheader('Livelli idrometrici attuali')
-            hydro_data = []
-            for feature in hydro_features:
-                hydro_data.append({'Sensore': feature, 'Valore [m]': last_data[feature]})
-            st.dataframe(pd.DataFrame(hydro_data).round(3))
+            st.success("Modello e scaler caricati correttamente!")
 
-        with col2:
-            # Ultimi dati di pioggia
-            st.subheader('Precipitazioni cumulate attuali')
-            rain_data = []
-            for feature in rain_features_original: # use original rain features
-                rain_data.append({'Sensore': feature, 'Valore [mm]': last_data[feature]})
-            st.dataframe(pd.DataFrame(rain_data).round(2))
-
-            # Umidità
-            st.subheader('Umidità attuale')
-            st.write(f"{humidity_feature_original[0]}: {last_data[humidity_feature_original[0]]:.1f}%") # use original humidity feature
-
-        # Previsione basata sugli ultimi dati disponibili
-        st.header('Previsione in base agli ultimi dati (Modello Originale)') # Modificato titolo per chiarezza
-
-        if st.button('Genera previsione (Modello Originale)'): # Modificato testo bottone
-            if model is None or scaler_features is None or scaler_targets is None:
-                st.error("Modello o scaler non caricati correttamente. Impossibile generare la previsione.")
-            else:
-                with st.spinner('Generazione previsione in corso (Modello Originale)...'): # Modificato testo spinner
-                    # Preparazione dei dati di input (ultime INPUT_WINDOW ore)
-                    latest_data = df.iloc[-INPUT_WINDOW:][feature_columns].values
-
-                    # Previsione
-                    predictions = predict(model, latest_data, scaler_features, scaler_targets, hydro_features, device, OUTPUT_WINDOW)
-
-                    if predictions is not None: # Check if prediction was successful
-                        # Visualizzazione dei risultati
-                        st.subheader(f'Previsione per le prossime {OUTPUT_WINDOW} ore (Modello Originale)') # Modificato titolo
-
-                        # Creazione dataframe risultati
-                        start_time = last_date
-                        prediction_times = [start_time + timedelta(hours=i) for i in range(OUTPUT_WINDOW)]
-                        results_df = pd.DataFrame(predictions, columns=hydro_features)
-                        results_df['Ora previsione'] = prediction_times
-                        results_df = results_df[['Ora previsione'] + hydro_features]
-
-                        # Visualizzazione tabella risultati
-                        st.dataframe(results_df.round(3))
-
-                        # Download dei risultati
-                        st.markdown(get_table_download_link(results_df), unsafe_allow_html=True)
-
-                        # Grafici per ogni sensore
-                        st.subheader('Grafici delle previsioni (Modello Originale)') # Modificato titolo
-                        figs = plot_predictions(predictions, hydro_features, OUTPUT_WINDOW, start_time)
-
-                        # Visualizzazione grafici
-                        for i, fig in enumerate(figs):
-                            st.pyplot(fig)
-                            sensor_name = hydro_features[i].replace(' ', '_').replace('/', '_')
-                            st.markdown(get_image_download_link(fig, f"{sensor_name}.png", f"il grafico di {hydro_features[i]} (Modello Originale)"), unsafe_allow_html=True) # Modificato testo download
-
-elif page == 'Simulazione':
-    st.header('Simulazione Idrologica (Modello Bettolelle con Storico)') # Titolo modificato per indicare il modello aggiornato
-    st.write('Inserisci i valori per simulare uno scenario idrologico con il modello aggiornato (Bettolelle con storico)') # Descrizione modificata
-
-    if df is None or model_mod is None or scaler_features_mod is None or scaler_targets_mod is None: # Usa model_mod e scaler modificati
-        st.warning("Attenzione: Alcuni file necessari per il modello Bettolelle non sono stati caricati correttamente. La simulazione potrebbe non funzionare.") # Modificato messaggio
-    else:
-        # Opzioni per la simulazione
-        sim_method = st.radio(
-            "Metodo di simulazione",
-            ['Inserisci dati orari', 'Inserisci manualmente tutti i valori'] # Rimosso 'Modifica dati recenti' per semplificare e focalizzarsi sul nuovo modello
-        )
-
-        if sim_method == 'Inserisci dati orari':
-            st.subheader(f'Inserisci dati per ogni ora ({INPUT_WINDOW} ore precedenti) per la simulazione del modello Bettolelle con storico') # Testo modificato
-
-            # Creiamo un dataframe vuoto per i dati della simulazione con le *nuove* feature
-            sim_data = np.zeros((INPUT_WINDOW, len(feature_columns_mod))) # Usa feature_columns_mod
-
-            # Opzioni per la compilazione rapida (pioggia e umidità) - ADATTATO ALLE NUOVE FEATURE
-            st.subheader("Strumenti di compilazione rapida")
-            quick_fill_col1, quick_fill_col2 = st.columns(2)
-
-            with quick_fill_col1:
-                # Opzioni per compilare rapidamente pioggia
-                st.write("Scenario di pioggia")
-                rain_scenario = st.selectbox(
-                    "Seleziona uno scenario predefinito",
-                    ["Nessuna pioggia", "Pioggia leggera", "Pioggia moderata", "Pioggia intensa", "Evento estremo"]
-                )
-
-                rain_values = {
-                    "Nessuna pioggia": 0.0,
-                    "Pioggia leggera": 2.0,
-                    "Pioggia moderata": 5.0,
-                    "Pioggia intensa": 5.0, # Valore ridotto per pioggia intensa per il modello modificato
-                    "Evento estremo": 10.0 # Valore ridotto per evento estremo per il modello modificato
-                }
-
-                rain_duration = st.slider("Durata pioggia (ore)", 0, 6, 3) # AGGIORNATO RANGE ORE
-                rain_start = st.slider("Ora di inizio pioggia", 0, 5, 0) # AGGIORNATO RANGE ORE
-
-                apply_rain = st.button("Applica scenario di pioggia")
-
-            with quick_fill_col2:
-                # Opzioni per compilare rapidamente umidità
-                st.write("Umidità del terreno")
-                humidity_preset = st.selectbox(
-                    "Seleziona condizione di umidità",
-                    ["Molto secco", "Secco", "Normale", "Umido", "Saturo"]
-                )
-
-                humidity_values = {
-                    "Molto secco": 20.0,
-                    "Secco": 40.0,
-                    "Normale": 60.0,
-                    "Umido": 80.0,
-                    "Saturo": 95.0
-                }
-
-                apply_humidity = st.button("Applica umidità")
-
-            # Creiamo tabs per separare i diversi tipi di dati (ADATTATO ALLE NUOVE FEATURE)
-            data_tabs = st.tabs(["Cumulate Pioggia", "Umidità", "Idrometri (Input)"]) # Tab idrometri rinominato per chiarezza
-
-            # Utilizziamo session_state per mantenere i valori tra le interazioni (ADATTATO ALLE NUOVE FEATURE)
-            if 'rain_data_mod' not in st.session_state:
-                st.session_state.rain_data_mod = np.zeros((INPUT_WINDOW, sum([1 for col in feature_columns_mod if col.startswith('Cumulata Sensore')]))) # Corretto per contare solo le cumulate
-            if 'humidity_data_mod' not in st.session_state:
-                st.session_state.humidity_data_mod = np.zeros((INPUT_WINDOW, sum([1 for col in feature_columns_mod if col.startswith('Umidita\' Sensore')]))) # Corretto per contare solo umidità
-            if 'hydro_input_data_mod' not in st.session_state: # Rinominato per chiarezza (input idrometri)
-                st.session_state.hydro_input_data_mod = np.zeros((INPUT_WINDOW, sum([1 for col in feature_columns_mod if col.startswith('Livello Idrometrico Sensore') and 'Bettolelle' not in col]))) # Corretto per contare idrometri input (escluso Bettolelle e Ponte Garibaldi)
-            if 'bettolelle_history_data_mod' not in st.session_state: # Aggiunto per storico Bettolelle
-                bettolelle_feature_index = feature_columns_mod.index('Livello Idrometrico Sensore 1112 [m] (Bettolelle)') if 'Livello Idrometrico Sensore 1112 [m] (Bettolelle)' in feature_columns_mod else -1
-                if bettolelle_feature_index != -1:
-                    st.session_state.bettolelle_history_data_mod = np.zeros((INPUT_WINDOW, 1))
+            st.subheader("Esempio di Previsione")
+            st.write("Inserisci i dati di input per ottenere la previsione per le prossime ore.")
+            # Creazione di un form per l'inserimento dei dati
+            input_data = []
+            for i in range(st.number_input("Numero di ore da simulare", value=6, min_value=1)):
+                row = st.text_input(f"Valori separati da virgola per ora {i}", "0,0,0,0,0,0,0,0,0,0")
+                try:
+                    valori = [float(x.strip()) for x in row.split(",")]
+                    input_data.append(valori)
+                except Exception as e:
+                    st.error(f"Errore nella conversione dei valori: {e}")
+            if st.button("Esegui Previsione"):
+                if len(input_data) == 0:
+                    st.error("Inserisci i dati correttamente.")
                 else:
-                    st.session_state.bettolelle_history_data_mod = np.zeros((INPUT_WINDOW, 1)) # Inizializza comunque anche se la feature non è presente
-
-            # Riferimenti più corti per maggiore leggibilità (ADATTATO ALLE NUOVE FEATURE)
-            rain_data_mod = st.session_state.rain_data_mod
-            humidity_data_mod = st.session_state.humidity_data_mod
-            hydro_input_data_mod = st.session_state.hydro_input_data_mod
-            bettolelle_history_data_mod = st.session_state.bettolelle_history_data_mod # Riferimento allo storico di Bettolelle
-
-            # Feature names per tab (ADATTATO ALLE NUOVE FEATURE)
-            rain_features_sim_mod = [col for col in feature_columns_mod if col.startswith('Cumulata Sensore')]
-            humidity_features_sim_mod = [col for col in feature_columns_mod if col.startswith('Umidita\' Sensore')]
-            hydro_input_features_sim_mod = [col for col in feature_columns_mod if col.startswith('Livello Idrometrico Sensore') and 'Bettolelle' not in col]
-            bettolelle_history_feature_sim_mod = ['Livello Idrometrico Sensore 1112 [m] (Bettolelle)'] # Feature per storico Bettolelle
-
-            # Se l'utente ha cliccato su applica scenario di pioggia
-            if apply_rain:
-                for h in range(rain_duration):
-                    hour_idx = (rain_start + h) % 6 # AGGIORNATO MODULO
-                    if hour_idx < INPUT_WINDOW:
-                        for i in range(len(rain_features_sim_mod)): # Usa rain_features_sim_mod
-                            rain_data_mod[hour_idx, i] = rain_values[rain_scenario]
-
-            # Se l'utente ha cliccato su applica umidità
-            if apply_humidity:
-                for h in range(INPUT_WINDOW):
-                    humidity_data_mod[h, 0] = humidity_values[humidity_preset] # Assume una sola feature di umidità, adatta se necessario
-
-            # Tab per la pioggia (ADATTATO ALLE NUOVE FEATURE)
-            with data_tabs[0]:
-                st.write("Inserisci i valori di pioggia cumulata per ogni ora (mm)")
-
-                # Creiamo un layout a griglia per l'inserimento dei dati orari
-                num_cols = 3  # AGGIORNATO NUM COLONNE GRIGLIA
-                num_rows = math.ceil(INPUT_WINDOW / num_cols)
-
-                for feature_idx, feature in enumerate(rain_features_sim_mod): # Usa rain_features_sim_mod
-                    st.write(f"### {feature}")
-
-                    for row in range(num_rows):
-                        cols = st.columns(num_cols)
-                        for col in range(num_cols):
-                            hour_idx = row * num_cols + col
-                            if hour_idx < INPUT_WINDOW:
-                                with cols[col]:
-                                    # Creiamo una chiave univoca per ogni input
-                                    input_key = f"rain_mod_{feature_idx}_{hour_idx}"
-
-                                    # Inizializziamo il valore nel session_state se non esiste
-                                    if input_key not in st.session_state:
-                                        st.session_state[input_key] = rain_data_mod[hour_idx, feature_idx]
-
-                                    # Aggiorniamo il valore nel session_state se è stato modificato dallo scenario
-                                    if apply_rain and hour_idx >= rain_start and hour_idx < rain_start + rain_duration:
-                                        st.session_state[input_key] = rain_values[rain_scenario]
-
-                                    # Usiamo il valore dal session_state
-                                    value = st.number_input(
-                                        f"Ora {hour_idx}",
-                                        0.0, 100.0,
-                                        st.session_state[input_key], 0.5,
-                                        key=input_key
-                                    )
-
-                                    # Aggiorniamo l'array con il valore corrente
-                                    rain_data_mod[hour_idx, feature_idx] = value
-
-            # Tab per l'umidità (ADATTATO ALLE NUOVE FEATURE)
-            with data_tabs[1]:
-                st.write("Inserisci i valori di umidità per ogni ora (%)")
-
-                for feature_idx, feature in enumerate(humidity_features_sim_mod): # Usa humidity_features_sim_mod
-                    st.write(f"### {feature}")
-
-                    for row in range(num_rows):
-                        cols = st.columns(num_cols)
-                        for col in range(num_cols):
-                            hour_idx = row * num_cols + col
-                            if hour_idx < INPUT_WINDOW:
-                                with cols[col]:
-                                    # Creiamo una chiave univoca per ogni input
-                                    input_key = f"humidity_mod_{feature_idx}_{hour_idx}"
-
-                                    # Inizializziamo il valore nel session_state se non esiste
-                                    if input_key not in st.session_state:
-                                        st.session_state[input_key] = humidity_data_mod[hour_idx, feature_idx]
-
-                                    # Aggiorniamo il valore nel session_state se è stato modificato dallo scenario
-                                    if apply_humidity:
-                                        st.session_state[input_key] = humidity_values[humidity_preset]
-
-                                    # Usiamo il valore dal session_state
-                                    value = st.number_input(
-                                        f"Ora {hour_idx}",
-                                        0.0, 100.0,
-                                        st.session_state[input_key], 0.5,
-                                        key=input_key
-                                    )
-
-                                    # Aggiorniamo l'array con il valore corrente
-                                    humidity_data_mod[hour_idx, feature_idx] = value
-
-            # Tab per gli idrometri (INPUT - ADATTATO ALLE NUOVE FEATURE)
-            with data_tabs[2]:
-                st.write("Inserisci i livelli idrometrici per ogni ora (m) (escluso Bettolelle e Ponte Garibaldi)") # Testo modificato
-
-                for feature_idx, feature in enumerate(hydro_input_features_sim_mod): # Usa hydro_input_features_sim_mod
-                    st.write(f"### {feature}")
-
-                    # Aggiungiamo un modo per impostare un valore costante
-                    const_col1, const_col2 = st.columns([3, 1])
-
-                    # Chiave univoca per ogni valore costante
-                    const_key = f"const_hydro_input_{feature_idx}"
-                    if const_key not in st.session_state:
-                        st.session_state[const_key] = 0.0
-
-                    with const_col1:
-                        const_value = st.number_input(
-                            f"Valore costante per {feature}",
-                            -1.0, 10.0,
-                            st.session_state[const_key],
-                            0.01,
-                            key=const_key
-                        )
-
-                    # Creiamo una funzione di callback per applicare il valore costante
-                    def apply_constant_value(feature_idx=feature_idx, value=const_value):
-                        for h in range(INPUT_WINDOW):
-                            st.session_state.hydro_input_data_mod[h, feature_idx] = value
-                            input_key = f"hydro_input_mod_{feature_idx}_{h}" # Generate input key
-                            st.session_state[input_key] = value # Update input widget session state
-
-                    with const_col2:
-                        if st.button(f"Applica a tutte le ore", key=f"apply_const_hydro_input_{feature_idx}", on_click=apply_constant_value):
-                            pass # Callback già gestisce l'aggiornamento
-
-                    for row in range(num_rows):
-                        cols = st.columns(num_cols)
-                        for col in range(num_cols):
-                            hour_idx = row * num_cols + col
-                            if hour_idx < INPUT_WINDOW:
-                                with cols[col]:
-                                    # Creiamo una chiave univoca per ogni input
-                                    input_key = f"hydro_input_mod_{feature_idx}_{hour_idx}"
-
-                                    # Inizializziamo il valore nel session_state se non esiste
-                                    if input_key not in st.session_state:
-                                        st.session_state[input_key] = hydro_input_data_mod[hour_idx, feature_idx]
-
-                                    # Usiamo il valore dal session_state
-                                    value = st.number_input(
-                                        f"Ora {hour_idx}",
-                                        -1.0, 10.0,
-                                        st.session_state[input_key], 0.01,
-                                        key=input_key
-                                    )
-
-                                    # Aggiorniamo l'array con il valore corrente
-                                    hydro_input_data_mod[hour_idx, feature_idx] = value
-
-            # Seleziona se includere lo storico di Bettolelle come input nella simulazione
-            include_bettolelle_history = st.checkbox("Includi storico Bettolelle come input nella simulazione", value=True)
-
-            if include_bettolelle_history:
-                # Tab per lo storico di Bettolelle (INPUT - ADATTATO ALLE NUOVE FEATURE)
-                bettolelle_history_tab = st.tabs(["Storico Bettolelle (Input)"])[0] # Crea una singola tab
-                with bettolelle_history_tab:
-                    st.write("Inserisci i livelli idrometrici storici di Bettolelle per ogni ora (m)") # Testo modificato
-
-                    for feature_idx, feature in enumerate(bettolelle_history_feature_sim_mod): # Usa bettolelle_history_feature_sim_mod
-                        st.write(f"### {feature}")
-
-                        for row in range(num_rows):
-                            cols = st.columns(num_cols)
-                            for col in range(num_cols):
-                                hour_idx = row * num_cols + col
-                                if hour_idx < INPUT_WINDOW:
-                                    with cols[col]:
-                                        # Creiamo una chiave univoca per ogni input
-                                        input_key = f"bettolelle_history_mod_{feature_idx}_{hour_idx}"
-
-                                        # Inizializziamo il valore nel session_state se non esiste
-                                        if input_key not in st.session_state:
-                                            st.session_state[input_key] = bettolelle_history_data_mod[hour_idx, feature_idx]
-
-                                        # Usiamo il valore dal session_state
-                                        value = st.number_input(
-                                            f"Ora {hour_idx}",
-                                            -1.0, 10.0,
-                                            st.session_state[input_key], 0.01,
-                                            key=input_key
-                                        )
-
-                                        # Aggiorniamo l'array con il valore corrente
-                                        bettolelle_history_data_mod[hour_idx, feature_idx] = value
-            else:
-                # Se non si include lo storico, riempi con zeri
-                bettolelle_history_data_mod = np.zeros_like(bettolelle_history_data_mod)
-
-
-            # Componiamo i dati per la simulazione (ADATTATO ALLE NUOVE FEATURE)
-            rain_offset = 0
-            humidity_offset = len(rain_features_sim_mod) # Usa rain_features_sim_mod length
-            hydro_input_offset = humidity_offset + len(humidity_features_sim_mod) # Usa humidity_features_sim_mod length
-            bettolelle_history_offset = hydro_input_offset + len(hydro_input_features_sim_mod) # Usa hydro_input_features_sim_mod length
-
-            sim_data_mod = np.zeros((INPUT_WINDOW, len(feature_columns_mod))) # Crea sim_data_mod con dimensioni corrette
-
-            for h in range(INPUT_WINDOW):
-                # Copiamo i dati di pioggia
-                for i in range(len(rain_features_sim_mod)): # Usa rain_features_sim_mod length
-                    sim_data_mod[h, rain_offset + i] = rain_data_mod[h, i]
-
-                # Copiamo i dati di umidità
-                for i in range(len(humidity_features_sim_mod)): # Usa humidity_features_sim_mod length
-                    sim_data_mod[h, humidity_offset + i] = humidity_data_mod[h, i]
-
-                # Copiamo i dati degli idrometri (input)
-                for i in range(len(hydro_input_features_sim_mod)): # Usa hydro_input_features_sim_mod length
-                    sim_data_mod[h, hydro_input_offset + i] = hydro_input_data_mod[h, i]
-
-                # Copiamo i dati dello storico di Bettolelle (se inclusi)
-                if include_bettolelle_history and bettolelle_history_feature_sim_mod: # Controlla se ci sono feature storiche di Bettolelle
-                    sim_data_mod[h, bettolelle_history_offset] = bettolelle_history_data_mod[h, 0] # Assume una sola feature storica di Bettolelle
-
-
-            # Visualizziamo un'anteprima dei dati (ADATTATO ALLE NUOVE FEATURE)
-            st.subheader("Anteprima dei dati inseriti (Modello Bettolelle con Storico)") # Testo modificato
-            preview_df_mod = pd.DataFrame(sim_data_mod, columns=feature_columns_mod) # Usa feature_columns_mod
-            preview_df_mod.index = [f"Ora {i}" for i in range(INPUT_WINDOW)]
-            st.dataframe(preview_df_mod.round(2))
-
-        else:  # Inserimento manuale completo (ADATTATO ALLE NUOVE FEATURE)
-            st.subheader('Inserisci valori per ogni parametro (Modello Bettolelle con Storico)') # Testo modificato
-
-            # Creiamo un dataframe vuoto per i dati della simulazione
-            sim_data_mod = np.zeros((INPUT_WINDOW, len(feature_columns_mod))) # Usa feature_columns_mod
-
-            # Raggruppiamo i controlli per tipo di sensore
-            with st.expander("Imposta valori di pioggia cumulata"): # Testo modificato
-                for i, feature in enumerate(rain_features_sim_mod): # Usa rain_features_sim_mod
-                    value = st.number_input(f'{feature} (mm)', 0.0, 100.0, 0.0, 0.5)
-                    sim_data_mod[:, i] = value
-
-            with st.expander("Imposta valore di umidità"):
-                value = st.number_input(f'{humidity_features_sim_mod[0]} (%)', 0.0, 100.0, 50.0, 0.5) # Usa humidity_features_sim_mod
-                sim_data_mod[:, len(rain_features_sim_mod)] = value # Usa rain_features_sim_mod length
-
-            with st.expander("Imposta livelli idrometrici (Input Modello Bettolelle)"): # Testo modificato
-                offset = len(rain_features_sim_mod) + len(humidity_features_sim_mod) # Usa le lunghezze corrette
-                for i, feature in enumerate(hydro_input_features_sim_mod): # Usa hydro_input_features_sim_mod
-                    value = st.number_input(f'{feature} (m)', -1.0, 10.0, 0.0, 0.01)
-                    sim_data_mod[:, offset + i] = value
-
-            # Checkbox per includere/escludere lo storico di Bettolelle
-            include_bettolelle_history_manual = st.checkbox("Includi storico Bettolelle come input nella simulazione (manuale)", value=True)
-
-            if include_bettolelle_history_manual:
-                with st.expander("Imposta livelli idrometrici storici di Bettolelle"): # Testo modificato
-                    offset_bettolelle_history = len(rain_features_sim_mod) + len(humidity_features_sim_mod) + len(hydro_input_features_sim_mod) # Calcola offset corretto
-                    value = st.number_input(f'{bettolelle_history_feature_sim_mod[0]} (m)', -1.0, 10.0, 0.0, 0.01) # Usa bettolelle_history_feature_sim_mod
-                    sim_data_mod[:, offset_bettolelle_history] = value
-            else:
-                offset_bettolelle_history = len(rain_features_sim_mod) + len(humidity_features_sim_mod) + len(hydro_input_features_sim_mod) # Calcola offset corretto
-                sim_data_mod[:, offset_bettolelle_history] = 0.0 # Imposta a zero se non incluso
-
-        # Bottone per eseguire la simulazione (ADATTATO ALLE NUOVE FEATURE e TARGET)
-        if st.button('Esegui simulazione (Modello Bettolelle con Storico)', type="primary"): # Testo pulsante modificato
-            if model_mod is None or scaler_features_mod is None or scaler_targets_mod is None: # Usa model_mod e scaler modificati
-                st.error("Modello Bettolelle o scaler non caricati correttamente. Impossibile eseguire la simulazione.") # Modificato messaggio
-            else:
-                with st.spinner('Simulazione in corso (Modello Bettolelle con Storico)...'): # Testo spinner modificato
-                    # Previsione - USA SIM_DATA_MOD, FEATURE_COLUMNS_MOD, TARGET_FEATURES_MODIFICATO, MODELLO MODIFICATO E SCALER MODIFICATI
-                    predictions_mod = predict(model_mod, sim_data_mod, scaler_features_mod, scaler_targets_mod, target_features_modificato, device, OUTPUT_WINDOW) # Usa modello e scaler modificati e target_features_modificato
-
-                    if predictions_mod is not None: # Check if prediction was successful
-                        # Visualizzazione dei risultati (ADATTATO AL NUOVO TARGET)
-                        st.subheader(f'Previsione per le prossime {OUTPUT_WINDOW} ore (Modello Bettolelle con Storico - Target: {target_features_modificato[0]})') # Testo modificato
-
-                        # Creazione dataframe risultati (ADATTATO AL NUOVO TARGET)
-                        current_time = datetime.now()
-                        prediction_times = [current_time + timedelta(hours=i) for i in range(OUTPUT_WINDOW)]
-                        results_df_mod = pd.DataFrame(predictions_mod, columns=target_features_modificato) # Usa target_features_modificato
-                        results_df_mod['Ora previsione'] = prediction_times
-                        results_df_mod = results_df_mod[['Ora previsione'] + target_features_modificato] # Usa target_features_modificato
-
-                        # Visualizzazione tabella risultati
-                        st.dataframe(results_df_mod.round(3))
-
-                        # Download dei risultati
-                        st.markdown(get_table_download_link(results_df_mod), unsafe_allow_html=True)
-
-                        # Grafici per ogni sensore (ADATTATO AL NUOVO TARGET)
-                        st.subheader(f'Grafici delle previsioni (Modello Bettolelle con Storico - Target: {target_features_modificato[0]})') # Testo modificato
-
-                        # Creiamo una visualizzazione che mostri sia i dati inseriti che le previsioni
-                        for i, feature in enumerate(target_features_modificato): # Usa target_features_modificato
-                            fig, ax = plt.subplots(figsize=(10, 6))
-
-                            # Indice per i dati degli idrometri nel sim_data_mod (corretto per il nuovo set di feature)
-                            hydro_idx = bettolelle_history_offset # Corretto offset per il nuovo set di features
-
-                            # Dati storici (input) - Grafico dello storico di Bettolelle
-                            input_hours = [current_time - timedelta(hours=INPUT_WINDOW - h) for h in range(INPUT_WINDOW)] # Ore precedenti
-                            ax.plot(input_hours, sim_data_mod[:, hydro_idx], 'b-', label='Storico Bettolelle (Input)') # Plot input storico
-
-                            # Dati previsti (output)
-                            ax.plot(prediction_times, predictions_mod[:, i], 'r-', label='Previsione') # Usa predictions_mod
-
-                            # Linea verticale per separare dati storici e previsione
-                            ax.axvline(x=current_time, color='black', linestyle='--')
-                            ax.annotate('Ora attuale', (current_time, ax.get_xlim()[0]),
-                                        xytext=(10, 10), textcoords='offset points')
-
-                            ax.set_title(f'Idrometro: {feature}')
-                            ax.set_xlabel('Data/Ora')
-                            ax.set_ylabel('Livello (m)')
-                            ax.legend()
-                            ax.grid(True)
-
-                            # Formattazione delle date sull'asse x
-                            plt.xticks(rotation=45)
-                            plt.tight_layout()
-
-                            st.pyplot(fig)
-                            sensor_name = feature.replace(' ', '_').replace('/', '_')
-                            st.markdown(get_image_download_link(fig, f"sim_mod_{sensor_name}.png", f"il grafico di {feature} (Modello Bettolelle con Storico)"), unsafe_allow_html=True) # Testo download modificato
-
-elif page == 'Analisi Dati Storici':
-    st.header('Analisi Dati Storici')
-
-    # ... (rest of Analisi Dati Storici page - no changes needed for model modification itself)
-
-elif page == 'Allenamento Modello':
-    st.header('Allenamento Modello')
-
-    st.subheader('Allenamento Modello Bettolelle (con storico)')
-    st.write("Clicca il bottone per avviare l'allenamento del modello Bettolelle con storico. Questo processo potrebbe richiedere del tempo.")
-
-    if st.button('Avvia Allenamento Modello Bettolelle (con storico)'):
-        if df is None:
-            st.error("Errore: Dati non caricati. Carica i dati nella sidebar per procedere con l'allenamento.")
-        else:
-            with st.spinner('Allenamento del modello in corso...'):
-                # --- Parametri per l'allenamento ---
-                INPUT_WINDOW_TRAIN = 6 # Ore di input
-                OUTPUT_WINDOW_TRAIN = 6 # Ore di output
-                VAL_SPLIT_TRAIN = 20 # Percentuale di dati per la validazione
-                BATCH_SIZE_TRAIN = 32
-                LEARNING_RATE_TRAIN = 0.001
-                NUM_EPOCHS_TRAIN = 100
-                OUTPUT_SIZE_MOD_TRAIN = 1 # Prevede solo 'Livello Idrometrico Sensore 1112 [m] (Bettolelle)'
-
-                # --- Preparazione dei dati modificata ---
-                X_train_mod, y_train_mod, X_val_mod, y_val_mod, scaler_features_mod_train, scaler_targets_mod_train, feature_columns_mod_train, target_features_mod_train = prepare_training_data_modificato_func(df, VAL_SPLIT_TRAIN)
-
-                # Calcola dinamicamente INPUT_SIZE_MOD in base alle feature selezionate
-                INPUT_SIZE_MOD_TRAIN = X_train_mod.shape[-1]
-
-                st.write(f"Numero di feature di input per il modello modificato: {INPUT_SIZE_MOD_TRAIN}")
-                st.write(f"Feature di input per il modello modificato: {feature_columns_mod_train}")
-                st.write(f"Feature target per il modello modificato: {target_features_mod_train}")
-
-                # --- Inizializzazione del modello modificato ---
-                device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-                model_mod_train = HydroLSTM(INPUT_SIZE_MOD_TRAIN, 128, OUTPUT_SIZE_MOD_TRAIN, OUTPUT_WINDOW_TRAIN, num_layers=2, dropout=0.2).to(device)
-
-                # --- Definizione della loss function e dell'optimizer ---
-                criterion_mod_train = nn.MSELoss()
-                optimizer_mod_train = torch.optim.Adam(model_mod_train.parameters(), lr=LEARNING_RATE_TRAIN)
-
-                # --- Training loop modificato ---
-                history_mod_train = {'train_loss': [], 'val_loss': []}
-
-                for epoch in range(NUM_EPOCHS_TRAIN):
-                    model_mod_train.train()
-                    train_loss = 0
-
-                    for batch_idx in range(0, len(X_train_mod), BATCH_SIZE_TRAIN):
-                        X_batch = torch.FloatTensor(X_train_mod[batch_idx:batch_idx+BATCH_SIZE_TRAIN]).to(device)
-                        y_batch = torch.FloatTensor(y_train_mod[batch_idx:batch_idx+BATCH_SIZE_TRAIN]).to(device)
-
-                        optimizer_mod_train.zero_grad()
-                        output = model_mod_train(X_batch)
-                        loss = criterion_mod_train(output, y_batch)
-                        loss.backward()
-                        optimizer_mod_train.step()
-
-                        train_loss += loss.item()
-
-                    avg_train_loss = train_loss / (len(X_train_mod) // BATCH_SIZE_TRAIN + 1)
-                    history_mod_train['train_loss'].append(avg_train_loss)
-
-                    # Validation loop
-                    model_mod_train.eval()
-                    val_loss = 0
-
-                    with torch.no_grad():
-                        for batch_idx in range(0, len(X_val_mod), BATCH_SIZE_TRAIN):
-                            X_batch_val = torch.FloatTensor(X_val_mod[batch_idx:batch_idx+BATCH_SIZE_TRAIN]).to(device)
-                            y_batch_val = torch.FloatTensor(y_val_mod[batch_idx:batch_idx+BATCH_SIZE_TRAIN]).to(device)
-
-                            output_val = model_mod_train(X_batch_val)
-                            loss_val = criterion_mod_train(output_val, y_batch_val)
-                            val_loss += loss_val.item()
-
-                    avg_val_loss = val_loss / (len(X_val_mod) // BATCH_SIZE_TRAIN + 1)
-                    history_mod_train['val_loss'].append(avg_val_loss)
-
-                    st.write(f'Epoch {epoch+1}/{NUM_EPOCHS_TRAIN}, Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}') # Output to Streamlit
-
-                # --- Salva il modello e gli scaler modificati ---
-                MODEL_OUTPUT_PATH_MOD_TRAIN = 'best_hydro_model_bettolelle_with_history.pth' # Sovrascrive il modello demo o caricato
-                SCALER_FEATURES_OUTPUT_PATH_MOD_TRAIN = 'scaler_features_bettolelle_with_history.joblib' # Sovrascrive scaler demo o caricato
-                SCALER_TARGETS_OUTPUT_PATH_MOD_TRAIN = 'scaler_targets_bettolelle_with_history.joblib' # Sovrascrive scaler demo o caricato
-
-                torch.save(model_mod_train.state_dict(), MODEL_OUTPUT_PATH_MOD_TRAIN)
-                joblib.dump(scaler_features_mod_train, SCALER_FEATURES_OUTPUT_PATH_MOD_TRAIN)
-                joblib.dump(scaler_targets_mod_train, SCALER_TARGETS_OUTPUT_PATH_MOD_TRAIN)
-
-                st.success(f"Modello Bettolelle con storico allenato e salvato con successo!")
-                st.write(f"Modello salvato in: {MODEL_OUTPUT_PATH_MOD_TRAIN}")
-                st.write(f"Scaler features salvato in: {SCALER_FEATURES_OUTPUT_PATH_MOD_TRAIN}")
-                st.write(f"Scaler targets salvato in: {SCALER_TARGETS_OUTPUT_PATH_MOD_TRAIN}")
-
-                # Visualizza le curve di loss in Streamlit
-                fig_loss, ax_loss = plt.subplots(figsize=(10, 6))
-                ax_loss.plot(history_mod_train['train_loss'], label='Train Loss')
-                ax_loss.plot(history_mod_train['val_loss'], label='Validation Loss')
-                ax_loss.set_xlabel('Epoch')
-                ax_loss.set_ylabel('Loss')
-                ax_loss.set_title('Curve di Loss del Modello Bettolelle con Storico')
-                ax_loss.legend()
-                ax_loss.grid(True)
-                st.pyplot(fig_loss)
-
-
-# Footer della dashboard
-st.sidebar.markdown('---')
-st.sidebar.info('Dashboard per modello predittivo idrologico')
+                    input_data = np.array(input_data)
+                    # Si assume che il numero di feature usato in training corrisponda a quello inserito
+                    hydro_features = ["Bettolelle"]  # Solo target per la previsione
+                    prediction = predict(model, input_data, scaler_features, scaler_targets, hydro_features, device, output_window)
+                    st.write("Previsione per le prossime ore:")
+                    st.dataframe(prediction)
+
+    with tab3:
+        st.header("Simulazione")
+        st.write("In questa sezione puoi simulare le previsioni a partire da dati d'ingresso personalizzati.")
+        # Esempio: utilizzo del modello addestrato in tab1 (se presente) oppure carica nuovamente modello e scaler
+        st.write("Utilizza un file CSV di esempio per simulare le previsioni.")
+        sim_file = st.file_uploader("Carica il file CSV per la simulazione", type=["csv"], key="sim_file")
+        if sim_file is not None:
+            try:
+                sim_df = pd.read_csv(sim_file, sep=';', parse_dates=['Data e Ora'], decimal=',')
+                sim_df['Data e Ora'] = pd.to_datetime(sim_df['Data e Ora'], format='%d/%m/%Y %H:%M')
+                st.success(f"File simulazione caricato. Righe: {len(sim_df)}")
+                st.dataframe(sim_df.head())
+                st.write("Seleziona le ore da utilizzare per la simulazione:")
+                input_window = st.number_input("Finestra di input (ore)", value=6, min_value=1)
+                # Otteniamo le feature modificate
+                get_input_features_func, target_features_mod = modifica_modello_previsionale()
+                feature_columns = get_input_features_func(sim_df)
+                st.write("Feature utilizzate:", feature_columns)
+                # Selezione delle ultime ore per la simulazione
+                sim_data = sim_df[feature_columns].tail(input_window).values
+                st.write("Anteprima dati di simulazione:")
+                st.dataframe(pd.DataFrame(sim_data, columns=feature_columns))
+
+                # Caricamento modello e scaler (se già addestrato in tab1 oppure da file)
+                st.write("Carica il modello e gli scaler per la simulazione:")
+                model_file_sim = st.file_uploader("Carica il file del modello (.pth)", type=["pth"], key="model_sim")
+                scaler_features_file_sim = st.file_uploader("Carica lo scaler delle feature (.joblib)", type=["joblib"], key="scaler_feat_sim")
+                scaler_targets_file_sim = st.file_uploader("Carica lo scaler dei target (.joblib)", type=["joblib"], key="scaler_targ_sim")
+                if model_file_sim is not None and scaler_features_file_sim is not None and scaler_targets_file_sim is not None:
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pth") as tmp_model_sim:
+                        tmp_model_sim.write(model_file_sim.read())
+                        model_path_sim = tmp_model_sim.name
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".joblib") as tmp_scaler_feat:
+                        tmp_scaler_feat.write(scaler_features_file_sim.read())
+                        scaler_features_path_sim = tmp_scaler_feat.name
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".joblib") as tmp_scaler_targ:
+                        tmp_scaler_targ.write(scaler_targets_file_sim.read())
+                        scaler_targets_path_sim = tmp_scaler_targ.name
+
+                    input_size = len(feature_columns)
+                    hidden_size = st.number_input("Hidden size", value=128, min_value=1, key="hidden_sim")
+                    num_layers = st.number_input("Numero di layers", value=2, min_value=1, key="layers_sim")
+                    output_window = st.number_input("Finestra di output (ore)", value=6, min_value=1, key="output_sim")
+                    output_size = 1  # Poiché il target è Bettolelle
+
+                    model_sim, device_sim = load_model(model_path_sim, input_size, output_size, output_window, hidden_size, num_layers)
+                    scaler_features_sim, scaler_targets_sim = load_scalers(scaler_features_path_sim, scaler_targets_path_sim)
+
+                    st.success("Modello e scaler per simulazione caricati correttamente!")
+                    if st.button("Esegui Simulazione"):
+                        prediction_sim = predict(model_sim, sim_data, scaler_features_sim, scaler_targets_sim, target_features_mod, device_sim, output_window)
+                        st.subheader("Previsione simulata per le prossime ore:")
+                        st.dataframe(prediction_sim)
+                        fig, ax = plt.subplots(figsize=(10, 5))
+                        hours = [sim_df['Data e Ora'].iloc[-1] + timedelta(hours=i+1) for i in range(output_window)]
+                        ax.plot(hours, prediction_sim[:, 0], marker='o', linestyle='-', color='r', label='Previsione')
+                        ax.set_title(f'Previsione per {target_features_mod[0]}')
+                        ax.set_xlabel('Data/Ora')
+                        ax.set_ylabel('Livello (m)')
+                        ax.legend()
+                        ax.grid(True)
+                        plt.xticks(rotation=45)
+                        st.pyplot(fig)
+            except Exception as e:
+                st.error(f"Errore nella simulazione: {e}")
+
+if __name__ == '__main__':
+    main()
