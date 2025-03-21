@@ -15,6 +15,7 @@ import math  # Importa il modulo math
 
 # Ripristino delle classi e funzioni dal modello originale
 
+# Model class with corrected reshape in forward method
 class HydroLSTM(nn.Module):
     def __init__(self, input_size, hidden_size, output_size, output_window, num_layers=2, dropout=0.2):
         super(HydroLSTM, self).__init__()
@@ -32,13 +33,13 @@ class HydroLSTM(nn.Module):
             dropout=dropout if num_layers > 1 else 0
         )
 
-        # Fully connected layer per la previsione dei livelli idrometrici
+        # Fully connected layer for hydrometric level prediction
         self.fc = nn.Linear(hidden_size, output_size * output_window)
 
     def forward(self, x):
         # x shape: (batch_size, seq_len, input_size)
 
-        # Inizializzazione dello stato nascosto
+        # Initialize hidden state
         h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
         c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
 
@@ -46,14 +47,14 @@ class HydroLSTM(nn.Module):
         # out shape: (batch_size, seq_len, hidden_size)
         out, _ = self.lstm(x, (h0, c0))
 
-        # Prendiamo solo l'output dell'ultimo timestep
+        # Take only the output of the last timestep
         out = out[:, -1, :]
 
         # Fully connected layer
         # out shape: (batch_size, output_size * output_window)
         out = self.fc(out)
 
-        # Reshaping per ottenere la sequenza di output
+        # Reshaping to get output sequence - FIXED RESHAPE
         # out shape: (batch_size, output_window, output_size)
         out = out.view(out.size(0), self.output_window, self.output_size)
 
@@ -180,6 +181,272 @@ def get_image_download_link(fig, filename, text):
     b64 = base64.b64encode(buf.getvalue()).decode()
     return f'<a href="data:image/png;base64,{b64}" download="{filename}">Scarica {text}</a>'
 
+
+# Support functions for data preparation and training - INTEGRATED NEW TRAINING SCRIPT
+
+def prepare_training_data(df, input_window, output_window, val_split, feature_columns, target_features):
+    """
+    Prepares data for training the LSTM model.
+
+    Args:
+        df (pd.DataFrame): DataFrame containing the data.
+        input_window (int): Length of input time window.
+        output_window (int): Length of output time window.
+        val_split (float): Percentage of data to use for validation.
+        feature_columns (list): Names of columns to use as input features.
+        target_features (list): Names of columns to predict (targets).
+
+    Returns:
+        tuple: X_train, y_train, X_val, y_val, scaler_features, scaler_targets, feature_columns, target_features
+    """
+    df_train = df.copy()
+
+    # Creating input (X) and output (y) sequences
+    X, y = [], []
+    for i in range(len(df_train) - input_window - output_window + 1):
+        X.append(df_train.iloc[i:i+input_window][feature_columns].values)
+        y.append(df_train.iloc[i+input_window:i+input_window+output_window][target_features].values)
+    X = np.array(X)
+    y = np.array(y)
+
+    # Data normalization
+    scaler_features_train = MinMaxScaler()
+    scaler_targets_train = MinMaxScaler()
+    X_flat = X.reshape(-1, X.shape[-1])
+    y_flat = y.reshape(-1, y.shape[-1])
+    X_scaled_flat = scaler_features_train.fit_transform(X_flat)
+    y_scaled_flat = scaler_targets_train.fit_transform(y_flat)
+    X_scaled = X_scaled_flat.reshape(X.shape)
+    y_scaled = y_scaled_flat.reshape(y.shape)
+
+    # Splitting into training and validation sets
+    split_idx = int(len(X_scaled) * (1 - val_split/100))
+    X_train = X_scaled[:split_idx]
+    y_train = y_scaled[:split_idx]
+    X_val = X_scaled[split_idx:]
+    y_val = y_scaled[split_idx:]
+
+    return X_train, y_train, X_val, y_val, scaler_features_train, scaler_targets_train, feature_columns, target_features
+
+
+def train_model(model, X_train, y_train, X_val, y_val, epochs, batch_size, learning_rate, device, model_path, scaler_features_path, scaler_targets_path, feature_columns, target_features):
+    """
+    Trains the LSTM model.
+
+    Args:
+        model (nn.Module): LSTM model to train.
+        X_train (np.array): Training data (features).
+        y_train (np.array): Training data (targets).
+        X_val (np.array): Validation data (features).
+        y_val (np.array): Validation data (targets).
+        epochs (int): Number of training epochs.
+        batch_size (int): Batch size.
+        learning_rate (float): Learning rate.
+        device (torch.device): Device (CPU/GPU).
+        model_path (str): Path to save the trained model.
+        scaler_features_path (str): Path to save the features scaler.
+        scaler_targets_path (str): Path to save the targets scaler.
+        feature_columns (list): Names of feature columns.
+        target_features (list): Names of target columns.
+
+    Returns:
+        tuple: model, training_loss_history, validation_loss_history
+    """
+
+    # Optimizer and Loss function
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    criterion = nn.MSELoss()
+
+    # Convert numpy arrays to PyTorch tensors
+    X_train_tensor = torch.FloatTensor(X_train).to(device)
+    y_train_tensor = torch.FloatTensor(y_train).to(device)
+    X_val_tensor = torch.FloatTensor(X_val).to(device)
+    y_val_tensor = torch.FloatTensor(y_val).to(device)
+
+    # Loss history for plots
+    training_loss_history = []
+    validation_loss_history = []
+
+    # Training loop
+    for epoch in range(epochs):
+        model.train()  # Set model to training mode
+        total_train_loss = 0.0
+        for i in range(0, len(X_train_tensor), batch_size):
+            X_batch = X_train_tensor[i:i+batch_size]
+            y_batch = y_train_tensor[i:i+batch_size]
+
+            optimizer.zero_grad()
+            outputs = model(X_batch)
+            loss = criterion(outputs, y_batch)
+            loss.backward()
+            optimizer.step()
+
+            total_train_loss += loss.item()
+
+        avg_train_loss = total_train_loss / (len(X_train_tensor) // batch_size + (1 if len(X_train_tensor) % batch_size != 0 else 0))
+        training_loss_history.append(avg_train_loss)
+
+        # Validation loop
+        model.eval()  # Set model to evaluation mode
+        with torch.no_grad():
+            total_val_loss = 0.0
+            for i in range(0, len(X_val_tensor), batch_size):
+                X_batch_val = X_val_tensor[i:i+batch_size]
+                y_batch_val = y_val_tensor[i:i+batch_size]
+                outputs_val = model(X_batch_val)
+                val_loss = criterion(outputs_val, y_batch_val)
+                total_val_loss += val_loss.item()
+
+            avg_val_loss = total_val_loss / (len(X_val_tensor) // batch_size + (1 if len(X_val_tensor) % batch_size != 0 else 0))
+            validation_loss_history.append(avg_val_loss)
+
+        print(f'Epoch {epoch+1}/{epochs}, Training Loss: {avg_train_loss:.4f}, Validation Loss: {avg_val_loss:.4f}')
+
+    # Save the model, scalers, and feature columns
+    torch.save(model.state_dict(), model_path)
+    joblib.dump(scaler_features_train, scaler_features_path)
+    joblib.dump(scaler_targets_train, scaler_targets_path)
+
+    print(f"Model saved at: {model_path}")
+    print(f"Features scaler saved at: {scaler_features_path}")
+    print(f"Targets scaler saved at: {scaler_targets_path}")
+
+    return model, training_loss_history, validation_loss_history
+
+
+def plot_loss_curves(training_loss_history, validation_loss_history):
+    """
+    Plots training and validation loss curves.
+
+    Args:
+        training_loss_history (list): List of training losses for each epoch.
+        validation_loss_history (list): List of validation losses for each epoch.
+
+    Returns:
+        matplotlib.figure.Figure: Matplotlib figure containing the plot.
+    """
+    epochs_range = range(1, len(training_loss_history) + 1)
+    plt.figure(figsize=(10, 6))
+    plt.plot(epochs_range, training_loss_history, 'b-', label='Training Loss')
+    plt.plot(epochs_range, validation_loss_history, 'r-', label='Validation Loss')
+    plt.title('Training and Validation Loss')
+    plt.xlabel('Epochs')
+    plt.ylabel('Loss')
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    return plt.gcf()  # Get current figure
+
+
+def evaluate_model_on_test(model, test_df, scaler_features, scaler_targets, input_window, output_window, feature_columns, target_features, device, batch_size):
+    """
+    Evaluates the model on the test set.
+
+    Args:
+        model (nn.Module): Trained LSTM model.
+        test_df (pd.DataFrame): DataFrame containing test data.
+        scaler_features (sklearn.preprocessing.MinMaxScaler): Scaler for features.
+        scaler_targets (sklearn.preprocessing.MinMaxScaler): Scaler for targets.
+        input_window (int): Length of input time window.
+        output_window (int): Length of output time window.
+        feature_columns (list): Names of feature columns.
+        target_features (list): Names of target columns.
+        device (torch.device): Device (CPU/GPU).
+        batch_size (int): Batch size for evaluation.
+
+    Returns:
+        tuple: test_loss, predictions, actuals
+    """
+    model.eval()
+    criterion = nn.MSELoss()
+    total_test_loss = 0.0
+    predictions_list = []
+    actuals_list = []
+
+    # Prepare test data in the same way as training data
+    X_test, y_test = [], []
+    for i in range(len(test_df) - input_window - output_window + 1):
+        X_test.append(test_df.iloc[i:i+input_window][feature_columns].values)
+        y_test.append(test_df.iloc[i+input_window:i+input_window+output_window][target_features].values)
+
+    X_test = np.array(X_test)
+    y_test = np.array(y_test)
+
+    # Normalize test data using the training scalers
+    X_test_flat = X_test.reshape(-1, X_test.shape[-1])
+    y_test_flat = y_test.reshape(-1, y_test.shape[-1])
+    X_test_scaled_flat = scaler_features.transform(X_test_flat)
+    y_test_scaled_flat = scaler_targets.transform(y_test_flat)
+    X_test_scaled = X_test_scaled_flat.reshape(X_test.shape)
+    y_test_scaled = y_test_scaled_flat.reshape(y_test.shape)
+
+    X_test_tensor = torch.FloatTensor(X_test_scaled).to(device)
+    y_test_tensor = torch.FloatTensor(y_test_scaled).to(device)
+
+    with torch.no_grad():  # No gradient calculation during testing
+        for i in range(0, len(X_test_tensor), batch_size):
+            X_batch_test = X_test_tensor[i:i+batch_size]
+            y_batch_test = y_test_tensor[i:i+batch_size]
+
+            outputs_test = model(X_batch_test)
+            test_loss_batch = criterion(outputs_test, y_batch_test)
+            total_test_loss += test_loss_batch.item()
+
+            # Store predictions and actuals for denormalization and further analysis
+            predictions_batch = outputs_test.cpu().numpy()
+            actuals_batch = y_batch_test.cpu().numpy()
+            predictions_list.append(predictions_batch)
+            actuals_list.append(actuals_batch)
+
+    avg_test_loss = total_test_loss / (len(X_test_tensor) // batch_size + (1 if len(X_test_tensor) % batch_size != 0 else 0))
+    print(f'Test Loss: {avg_test_loss:.4f}')
+
+    # Concatenate all predictions and actuals
+    predictions_np = np.concatenate(predictions_list, axis=0)
+    actuals_np = np.concatenate(actuals_list, axis=0)
+
+    # Denormalize predictions and actuals
+    predictions_denormalized = scaler_targets.inverse_transform(predictions_np.reshape(-1, len(target_features))).reshape(predictions_np.shape)
+    actuals_denormalized = scaler_targets.inverse_transform(actuals_np.reshape(-1, len(target_features))).reshape(actuals_np.shape)
+
+    return avg_test_loss, predictions_denormalized, actuals_denormalized
+
+
+def plot_test_predictions(predictions, actuals, target_features, output_window):
+    """
+    Plots test set predictions compared to actual values.
+
+    Args:
+        predictions (np.array): Model predictions on test set (denormalized).
+        actuals (np.array): Actual values from test set (denormalized).
+        target_features (list): Names of target columns.
+        output_window (int): Length of output time window.
+
+    Returns:
+        list[matplotlib.figure.Figure]: List of matplotlib figures, one for each target feature.
+    """
+    figures = []
+    num_samples_to_plot = min(len(predictions), 10)  # Plot only first 10 samples or less if fewer available
+
+    for i, sensor_name in enumerate(target_features):
+        fig, ax = plt.subplots(figsize=(12, 6))
+
+        # Plot a limited number of prediction samples to avoid overcrowding
+        for sample_idx in range(num_samples_to_plot):
+            hours = np.arange(output_window)
+            ax.plot(hours, actuals[sample_idx, :, i], marker='o', linestyle='-', label=f'Actual (Sample {sample_idx+1})' if sample_idx == 0 else "", color='blue')  # Actuals
+            ax.plot(hours, predictions[sample_idx, :, i], marker='x', linestyle='--', label=f'Prediction (Sample {sample_idx+1})' if sample_idx == 0 else "", color='red')  # Predictions
+
+        ax.set_title(f'Predictions vs Actual - {sensor_name}')
+        ax.set_xlabel('Future Hours')
+        ax.set_ylabel('Hydrometric Level [m]')
+        ax.legend()
+        ax.grid(True)
+        plt.tight_layout()
+        figures.append(fig)
+    return figures
+
+
 # Titolo dell'app
 st.title('Dashboard Modello Predittivo Idrologico')
 
@@ -192,6 +459,7 @@ use_demo_files = st.sidebar.checkbox('Usa file di esempio', value=True)
 if use_demo_files:
     # Qui dovresti fornire percorsi ai file di esempio
     DATA_PATH = 'dati_idro.csv'  # Sostituisci con il percorso corretto
+    TEST_DATA_PATH = 'dati_idro_test.csv' # Sostituisci con il percorso corretto
     MODEL_PATH = 'best_hydro_model.pth'  # Sostituisci con il percorso corretto
     SCALER_FEATURES_PATH = 'scaler_features.joblib'  # Sostituisci con il percorso corretto
     SCALER_TARGETS_PATH = 'scaler_targets.joblib'  # Sostituisci con il percorso corretto
@@ -199,6 +467,7 @@ else:
     # Caricamento dei file dall'utente
     st.sidebar.subheader('Carica i tuoi file')
     data_file = st.sidebar.file_uploader('File CSV con i dati storici', type=['csv'])
+    test_data_file = st.sidebar.file_uploader('File CSV con i dati di test (opzionale per allenamento)', type=['csv'])
     model_file = st.sidebar.file_uploader('File del modello (.pth)', type=['pth'])
     scaler_features_file = st.sidebar.file_uploader('File scaler features (.joblib)', type=['joblib'])
     scaler_targets_file = st.sidebar.file_uploader('File scaler targets (.joblib)', type=['joblib'])
@@ -209,26 +478,44 @@ else:
     else:
         pass
 
-# Definizione delle costanti
-INPUT_WINDOW = 6 # MODIFICATO INPUT_WINDOW A 6 ORE
-OUTPUT_WINDOW = 6 # MODIFICATO OUTPUT_WINDOW A 6 ORE
+# Definizione delle costanti - MODIFIED INPUT AND OUTPUT WINDOW
+INPUT_WINDOW = 24 # MODIFICATO INPUT_WINDOW A 24 ORE
+OUTPUT_WINDOW = 12 # MODIFICATO OUTPUT_WINDOW A 12 ORE
+HIDDEN_SIZE = 128
+NUM_LAYERS = 2
+DROPOUT = 0.2
+EPOCHS = 50
+BATCH_SIZE = 32
+LEARNING_RATE = 0.001
+VALIDATION_SPLIT = 20
 
 # Caricamento dei dati storici
 df = None # Initialize df to None
+test_df = None # Initialize test_df to None
 try:
     if use_demo_files:
         df = pd.read_csv(DATA_PATH, sep=';', parse_dates=['Data e Ora'], decimal=',')
         df['Data e Ora'] = pd.to_datetime(df['Data e Ora'], format='%d/%m/%Y %H:%M')
+        test_df = pd.read_csv(TEST_DATA_PATH, sep=';', parse_dates=['Data e Ora'], decimal=',')
+        test_df['Data e Ora'] = pd.to_datetime(test_df['Data e Ora'], format='%d/%m/%Y %H:%M')
+
     elif data_file is not None: # Check if data_file is loaded
         df = pd.read_csv(data_file, sep=';', parse_dates=['Data e Ora'], decimal=',')
         df['Data e Ora'] = pd.to_datetime(df['Data e Ora'], format='%d/%m/%Y %H:%M')
+        if test_data_file:
+            test_df = pd.read_csv(test_data_file, sep=';', parse_dates=['Data e Ora'], decimal=',')
+            test_df['Data e Ora'] = pd.to_datetime(test_df['Data e Ora'], format='%d/%m/%Y %H:%M')
+
     if df is not None:
         st.sidebar.success(f'Dati caricati: {len(df)} righe')
+    if test_df is not None:
+        st.sidebar.success(f'Dati di test caricati: {len(test_df)} righe')
+
 except Exception as e:
     st.sidebar.error(f'Errore nel caricamento dei dati: {e}')
 
 
-# Estrazione delle caratteristiche (originali - potremmo non usarle direttamente nella simulazione modificata)
+# Estrazione delle caratteristiche
 rain_features_original = [
     'Cumulata Sensore 1295 (Arcevia)',
     'Cumulata Sensore 2637 (Bettolelle)',
@@ -247,10 +534,16 @@ hydro_features_original = [
 ]
 
 feature_columns_original = rain_features_original + humidity_feature_original + hydro_features_original
+target_features_original = hydro_features_original
 
-# Definisci le feature columns e hydro_features iniziali (prima della modifica)
 feature_columns = feature_columns_original
 hydro_features = hydro_features_original
+target_features = target_features_original
+
+
+input_size = len(feature_columns)
+output_size = len(target_features)
+
 
 model = None
 scaler_features = None
@@ -260,11 +553,11 @@ scaler_targets = None
 if use_demo_files or (data_file and model_file and scaler_features_file and scaler_targets_file):
     try:
         if use_demo_files:
-            model, device = load_model(MODEL_PATH, 8, 1, OUTPUT_WINDOW) # MODIFIED: input_size=8, output_size=1
+            model, device = load_model(MODEL_PATH, input_size, output_size, OUTPUT_WINDOW)
             scaler_features, scaler_targets = load_scalers(SCALER_FEATURES_PATH, SCALER_TARGETS_PATH)
         else:
             model_bytes = io.BytesIO(model_file.read())
-            model, device = load_model(model_bytes, 8, 1, OUTPUT_WINDOW) # MODIFIED: input_size=8, output_size=1
+            model, device = load_model(model_bytes, input_size, output_size, OUTPUT_WINDOW)
             scaler_features, scaler_targets = load_scalers(scaler_features_file, scaler_targets_file)
 
         if model is not None and scaler_features is not None and scaler_targets is not None: # Check if loading was successful
@@ -430,7 +723,7 @@ if page == 'Dashboard':
 
 elif page == 'Simulazione':
     st.header('Simulazione Idrologica (Modello Aggiornato)') # Titolo modificato per indicare il modello aggiornato
-    st.write('Inserisci i valori per simulare uno scenario idrologico con il modello aggiornato (Bettolelle)') # Descrizione modificata
+    st.write(f'Inserisci i valori per simulare uno scenario idrologico con il modello aggiornato (Bettolelle). Il modello richiede **{INPUT_WINDOW} ore** di dati di input.') # Descrizione modificata
 
     if df is None or model is None or scaler_features is None or scaler_targets is None:
         st.warning("Attenzione: Alcuni file necessari non sono stati caricati correttamente. La simulazione potrebbe non funzionare.")
@@ -467,8 +760,8 @@ elif page == 'Simulazione':
                     "Evento estremo": 10.0 # Valore ridotto per evento estremo per il modello modificato
                 }
 
-                rain_duration = st.slider("Durata pioggia (ore)", 0, 6, 3) # AGGIORNATO RANGE ORE
-                rain_start = st.slider("Ora di inizio pioggia", 0, 5, 0) # AGGIORNATO RANGE ORE
+                rain_duration = st.slider("Durata pioggia (ore)", 0, INPUT_WINDOW, 3) # AGGIORNATO RANGE ORE
+                rain_start = st.slider("Ora di inizio pioggia", 0, INPUT_WINDOW-1, 0) # AGGIORNATO RANGE ORE
 
                 apply_rain = st.button("Applica scenario di pioggia")
 
@@ -514,7 +807,7 @@ elif page == 'Simulazione':
             # Se l'utente ha cliccato su applica scenario di pioggia
             if apply_rain:
                 for h in range(rain_duration):
-                    hour_idx = (rain_start + h) % 6 # AGGIORNATO MODULO
+                    hour_idx = (rain_start + h) % INPUT_WINDOW # AGGIORNATO MODULO
                     if hour_idx < INPUT_WINDOW:
                         for i in range(len(rain_features_sim_mod)): # Usa rain_features_sim_mod
                             rain_data_mod[hour_idx, i] = rain_values[rain_scenario]
@@ -554,7 +847,7 @@ elif page == 'Simulazione':
 
                                     # Usiamo il valore dal session_state
                                     value = st.number_input(
-                                        f"Ora {hour_idx}",
+                                        f"Ora {hour_idx+1}", # Hour index + 1 for display
                                         0.0, 100.0,
                                         st.session_state[input_key], 0.5,
                                         key=input_key
@@ -589,7 +882,7 @@ elif page == 'Simulazione':
 
                                     # Usiamo il valore dal session_state
                                     value = st.number_input(
-                                        f"Ora {hour_idx}",
+                                        f"Ora {hour_idx+1}", # Hour index + 1 for display
                                         0.0, 100.0,
                                         st.session_state[input_key], 0.5,
                                         key=input_key
@@ -648,7 +941,7 @@ elif page == 'Simulazione':
 
                                     # Usiamo il valore dal session_state
                                     value = st.number_input(
-                                        f"Ora {hour_idx}",
+                                        f"Ora {hour_idx+1}", # Hour index + 1 for display
                                         -1.0, 10.0,
                                         st.session_state[input_key], 0.01,
                                         key=input_key
@@ -681,11 +974,12 @@ elif page == 'Simulazione':
             # Visualizziamo un'anteprima dei dati (ADATTATO ALLE NUOVE FEATURE)
             st.subheader("Anteprima dei dati inseriti (Modello Bettolelle)") # Testo modificato
             preview_df_mod = pd.DataFrame(sim_data_mod, columns=feature_columns_mod) # Usa feature_columns_mod
-            preview_df_mod.index = [f"Ora {i}" for i in range(INPUT_WINDOW)]
+            preview_df_mod.index = [f"Ora {i+1}" for i in range(INPUT_WINDOW)] # Hour index + 1 for display
             st.dataframe(preview_df_mod.round(2))
 
         else:  # Inserimento manuale completo (ADATTATO ALLE NUOVE FEATURE)
             st.subheader('Inserisci valori per ogni parametro (Modello Bettolelle)') # Testo modificato
+            st.write(f"Inserisci i valori medi per le ultime **{INPUT_WINDOW} ore**.") # Instruction updated for 24 hours input
 
             # Creiamo un dataframe vuoto per i dati della simulazione
             sim_data_mod = np.zeros((INPUT_WINDOW, len(feature_columns_mod))) # Usa feature_columns_mod
@@ -776,7 +1070,130 @@ elif page == 'Analisi Dati Storici':
 
 elif page == 'Allenamento Modello':
     st.header('Allenamento Modello')
-    # ... (rest of Allenamento Modello page - no changes needed here, as the modified training is already implemented there)
+
+    # --- Configurazione Allenamento nella UI ---
+    st.subheader('Configurazione Allenamento')
+    col1, col2 = st.columns(2)
+    with col1:
+        epochs = st.number_input('Epoche', min_value=1, value=EPOCHS)
+        batch_size = st.number_input('Batch Size', min_value=8, value=BATCH_SIZE)
+        learning_rate = st.number_input('Learning Rate', step=0.0001, format="%.4f", value=LEARNING_RATE)
+    with col2:
+        validation_split = st.slider('Validation Split (%)', min_value=10, max_value=50, value=VALIDATION_SPLIT)
+        hidden_size = st.number_input('Hidden Size LSTM', min_value=32, value=HIDDEN_SIZE)
+        num_layers = st.number_input('Numero di Livelli LSTM', min_value=1, value=NUM_LAYERS)
+        dropout_rate = st.slider('Dropout Rate', min_value=0.0, max_value=0.5, step=0.05, value=DROPOUT)
+
+    # --- Scelta features e targets ---
+    st.subheader('Selezione Features e Targets')
+
+    # Features selection - using original features for now, can be expanded
+    st.write("Features selezionate per l'allenamento:")
+    st.dataframe(pd.DataFrame({'Features': feature_columns_original}))
+
+    # Targets selection - using original targets for now, can be expanded
+    st.write("Targets selezionati per l'allenamento:")
+    st.dataframe(pd.DataFrame({'Targets': target_features_original}))
+
+    # --- Caricamento dati di training e test (opzionale) ---
+    st.subheader('Carica dati per Allenamento e Test (opzionale)')
+    train_data_file_upload = st.file_uploader("Carica file CSV per dati di training", type=['csv'])
+    test_data_file_upload = st.file_uploader("Carica file CSV per dati di test (opzionale)", type=['csv'])
+
+    train_df_for_training = df if use_demo_files else None
+    test_df_for_training = test_df if use_demo_files else None
+
+    if train_data_file_upload is not None:
+        try:
+            train_df_for_training = pd.read_csv(train_data_file_upload, sep=';', parse_dates=['Data e Ora'], decimal=',')
+            train_df_for_training['Data e Ora'] = pd.to_datetime(train_df_for_training['Data e Ora'], format='%d/%m/%Y %H:%M')
+            st.success("File dati di training caricato con successo.")
+        except Exception as e:
+            st.error(f"Errore nel caricamento del file di training: {e}")
+            train_df_for_training = None
+
+    if test_data_file_upload is not None:
+        try:
+            test_df_for_training = pd.read_csv(test_data_file_upload, sep=';', parse_dates=['Data e Ora'], decimal=',')
+            test_df_for_training['Data e Ora'] = pd.to_datetime(test_df_for_training['Data e Ora'], format='%d/%m/%Y %H:%M')
+            st.success("File dati di test caricato con successo.")
+        except Exception as e:
+            st.error(f"Errore nel caricamento del file di test: {e}")
+            test_df_for_training = None
+
+
+    # --- Bottone per avviare l'allenamento ---
+    if st.button('Avvia Allenamento Modello', type="primary"):
+        if train_df_for_training is None:
+            st.error("Nessun dato di training disponibile. Carica un file CSV o usa i file di esempio.")
+        else:
+            with st.spinner('Allenamento del modello in corso...'):
+                try:
+                    # Preparazione dati
+                    X_train_val, y_train_val, X_val, y_val, scaler_features_train, scaler_targets_train, feature_columns_trained, target_features_trained = prepare_training_data(
+                        train_df_for_training, INPUT_WINDOW, OUTPUT_WINDOW, validation_split, feature_columns_original, target_features_original
+                    )
+
+                    # Definizione e training del modello
+                    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                    model_trained = HydroLSTM(input_size, hidden_size, output_size, OUTPUT_WINDOW, num_layers, dropout_rate).to(device)
+
+                    trained_model, training_loss_history, validation_loss_history = train_model(
+                        model_trained, X_train_val, y_train_val, X_val, y_val, epochs, batch_size, learning_rate, device,
+                        'trained_model.pth', 'scaler_features_trained.joblib', 'scaler_targets_trained.joblib', feature_columns_trained, target_features_trained
+                    )
+
+                    st.success('Modello allenato con successo!')
+
+                    # Plot delle loss curves
+                    loss_fig = plot_loss_curves(training_loss_history, validation_loss_history)
+                    st.pyplot(loss_fig)
+                    st.markdown(get_image_download_link(loss_fig, "loss_curves.png", "Scarica grafico Loss Curves"), unsafe_allow_html=True)
+
+                    # --- Evaluation on Test Set (if test data is provided) ---
+                    if test_df_for_training is not None:
+                        st.subheader('Valutazione sul Test Set')
+                        test_loss, test_predictions_denorm, test_actuals_denorm = evaluate_model_on_test(
+                            trained_model, test_df_for_training, scaler_features_train, scaler_targets_train, INPUT_WINDOW, OUTPUT_WINDOW, feature_columns_trained, target_features_trained, device, batch_size
+                        )
+                        st.write(f"**Test Loss:** {test_loss:.4f}")
+
+                        test_predictions_figs = plot_test_predictions(test_predictions_denorm, test_actuals_denorm, target_features_trained, OUTPUT_WINDOW)
+                        for i, fig in enumerate(test_predictions_figs):
+                            st.pyplot(fig)
+                            sensor_name = target_features_trained[i].replace(' ', '_').replace('/', '_')
+                            st.markdown(get_image_download_link(fig, f"test_predictions_{sensor_name}.png", f"Scarica grafico Previsioni Test Set per {target_features_trained[i]}"), unsafe_allow_html=True)
+
+
+                    # --- Download Link for Trained Model ---
+                    st.subheader('Download Modello Allenato')
+                    model_bytes_buffer = io.BytesIO()
+                    torch.save(trained_model.state_dict(), model_bytes_buffer)
+                    model_bytes = model_bytes_buffer.getvalue()
+
+                    st.download_button(
+                        label="Download Modello (.pth)",
+                        data=model_bytes,
+                        file_name="trained_hydro_model.pth",
+                        mime="application/octet-stream"
+                    )
+                    st.download_button(
+                        label="Download Scaler Features (.joblib)",
+                        data=joblib.dumps(scaler_features_train),
+                        file_name="scaler_features_trained.joblib",
+                        mime="application/octet-stream"
+                    )
+                    st.download_button(
+                        label="Download Scaler Targets (.joblib)",
+                        data=joblib.dumps(scaler_targets_train),
+                        file_name="scaler_targets_trained.joblib",
+                        mime="application/octet-stream"
+                    )
+
+
+                except Exception as e:
+                    st.error(f"Errore durante l'allenamento del modello: {e}")
+                    st.exception(e) # Mostra i dettagli completi dell'eccezione
 
 
 # Footer della dashboard
