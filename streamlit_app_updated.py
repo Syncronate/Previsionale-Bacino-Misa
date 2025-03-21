@@ -988,7 +988,7 @@ elif page == 'Simulazione':
 
                             st.pyplot(fig)
                             sensor_name = feature.replace(' ', '_').replace('/', '_')
-                            st.markdown(get_image_download_link(fig, f"sim_{sensor_name}.png", f"Scarica il grafico di {feature}"), unsafe_allow_html=True)
+                            st.markdown(get_image_download_link(fig, f"{sensor_name}.png", f"Scarica il grafico di {feature}"), unsafe_allow_html=True)
 
 elif page == 'Analisi Dati Storici':
     st.header('Analisi Dati Storici')
