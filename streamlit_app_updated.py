@@ -229,9 +229,9 @@ def prepare_training_data(df, input_window, output_window, val_split, feature_co
     return X_train, y_train, X_val, y_val, scaler_features_train, scaler_targets_train, feature_columns, target_features
 
 
-def train_model(model, X_train, y_train, X_val, y_val, epochs, batch_size, learning_rate, device, model_path, scaler_features_path, scaler_targets_path, feature_columns, target_features):
+def train_model(model, X_train, y_train, X_val, y_val, epochs, batch_size, learning_rate, device, model_path, scaler_features_path, scaler_targets_path, feature_columns, target_features, loss_chart_placeholder): # Aggiunto loss_chart_placeholder
     """
-    Trains the LSTM model.
+    Trains the LSTM model and updates the loss chart in Streamlit.
 
     Args:
         model (nn.Module): LSTM model to train.
@@ -248,7 +248,7 @@ def train_model(model, X_train, y_train, X_val, y_val, epochs, batch_size, learn
         scaler_targets_path (str): Path to save the targets scaler.
         feature_columns (list): Names of feature columns.
         target_features (list): Names of target columns.
-
+        loss_chart_placeholder (st.empty): Placeholder per il grafico delle loss in Streamlit. # Aggiunto loss_chart_placeholder
     Returns:
         tuple: model, training_loss_history, validation_loss_history
     """
@@ -301,6 +301,11 @@ def train_model(model, X_train, y_train, X_val, y_val, epochs, batch_size, learn
             validation_loss_history.append(avg_val_loss)
 
         print(f'Epoch {epoch+1}/{epochs}, Training Loss: {avg_train_loss:.4f}, Validation Loss: {avg_val_loss:.4f}')
+
+        # Aggiorna il grafico delle loss nel placeholder
+        loss_fig = plot_loss_curves(training_loss_history, validation_loss_history)
+        loss_chart_placeholder.pyplot(loss_fig) # Aggiorna il placeholder con il nuovo grafico
+
 
     # Save the model, scalers, and feature columns
     torch.save(model.state_dict(), model_path)
@@ -1061,7 +1066,7 @@ elif page == 'Simulazione':
 
                             st.pyplot(fig)
                             sensor_name = feature.replace(' ', '_').replace('/', '_')
-                            st.markdown(get_image_download_link(fig, f"sim_mod_{sensor_name}.png", f"il grafico di {feature} (Modello Bettolelle)"), unsafe_allow_html=True) # Testo download modificato
+                            st.markdown(get_image_download_link(fig, f"sim_mod_{sensor_name}.png", f"il grafico di {feature} (Modello Bettolelle)"), unsafe_allow_html=True)
 
 elif page == 'Analisi Dati Storici':
     st.header('Analisi Dati Storici')
@@ -1138,14 +1143,18 @@ elif page == 'Allenamento Modello':
                     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
                     model_trained = HydroLSTM(input_size, hidden_size, output_size, OUTPUT_WINDOW, num_layers, dropout_rate).to(device)
 
+                    # Creazione segnaposto per il grafico delle loss
+                    loss_chart_placeholder = st.empty() # Aggiunto placeholder qui
+
                     trained_model, training_loss_history, validation_loss_history = train_model(
                         model_trained, X_train_val, y_train_val, X_val, y_val, epochs, batch_size, learning_rate, device,
-                        'trained_model.pth', 'scaler_features_trained.joblib', 'scaler_targets_trained.joblib', feature_columns_trained, target_features_trained
+                        'trained_model.pth', 'scaler_features_trained.joblib', 'scaler_targets_trained.joblib', feature_columns_trained, target_features_trained,
+                        loss_chart_placeholder # Passa il placeholder alla funzione train_model
                     )
 
                     st.success('Modello allenato con successo!')
 
-                    # Plot delle loss curves
+                    # Plot delle loss curves FINALE (per assicurarsi che sia visualizzato correttamente)
                     loss_fig = plot_loss_curves(training_loss_history, validation_loss_history)
                     st.pyplot(loss_fig)
                     st.markdown(get_image_download_link(loss_fig, "loss_curves.png", "Scarica grafico Loss Curves"), unsafe_allow_html=True)
