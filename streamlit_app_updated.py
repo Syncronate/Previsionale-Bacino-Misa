@@ -58,6 +58,7 @@ class HydroLSTM(nn.Module):
         self.fc = nn.Linear(hidden_size, output_size * output_window)
 
     def forward(self, x):
+        print("Input x shape:", x.shape)  # Debug print: shape of input x
         # x shape: (batch_size, seq_len, input_size)
 
         # Inizializzazione dello stato nascosto
@@ -67,17 +68,21 @@ class HydroLSTM(nn.Module):
         # LSTM forward pass
         # out shape: (batch_size, seq_len, hidden_size)
         out, _ = self.lstm(x, (h0, c0))
+        print("LSTM out shape:", out.shape)  # Debug print: shape after LSTM
 
         # Prendiamo solo l'output dell'ultimo timestep
         out = out[:, -1, :]
+        print("Out after last timestep slice:", out.shape) # Debug print: shape after slicing
 
         # Fully connected layer
         # out shape: (batch_size, output_size * output_window)
         out = self.fc(out)
+        print("FC out shape:", out.shape)  # Debug print: shape after FC layer
 
         # Reshaping per ottenere la sequenza di output
         # out shape: (batch_size, output_window, output_size)
         out = out.view(-1, self.output_window, self.output_size)
+        print("Reshaped out shape:", out.shape) # Debug print: shape after reshape
 
         return out
 
