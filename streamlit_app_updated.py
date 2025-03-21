@@ -29,10 +29,10 @@ class TimeSeriesDataset(Dataset):
     def __init__(self, X, y):
         self.X = torch.tensor(X, dtype=torch.float32)
         self.y = torch.tensor(y, dtype=torch.float32)
-
+        
     def __len__(self):
         return len(self.X)
-
+    
     def __getitem__(self, idx):
         return self.X[idx], self.y[idx]
 
@@ -58,7 +58,6 @@ class HydroLSTM(nn.Module):
         self.fc = nn.Linear(hidden_size, output_size * output_window)
 
     def forward(self, x):
-        print("Input x shape:", x.shape)  # Debug print: shape of input x
         # x shape: (batch_size, seq_len, input_size)
 
         # Inizializzazione dello stato nascosto
@@ -68,23 +67,17 @@ class HydroLSTM(nn.Module):
         # LSTM forward pass
         # out shape: (batch_size, seq_len, hidden_size)
         out, _ = self.lstm(x, (h0, c0))
-        print("LSTM out shape:", out.shape)  # Debug print: shape after LSTM
 
         # Prendiamo solo l'output dell'ultimo timestep
         out = out[:, -1, :]
-        print("Out after last timestep slice:", out.shape) # Debug print: shape after slicing
 
         # Fully connected layer
         # out shape: (batch_size, output_size * output_window)
         out = self.fc(out)
-        print("FC out shape:", out.shape)  # Debug print: shape after FC layer
 
         # Reshaping per ottenere la sequenza di output
         # out shape: (batch_size, output_window, output_size)
-        batch_size = x.size(0) # Get batch size explicitly
-        # Corrected line: Use OUTPUT_WINDOW directly for reshaping
-        out = out.view(batch_size, OUTPUT_WINDOW, self.output_size) # Use global OUTPUT_WINDOW
-        print("Reshaped out shape:", out.shape) # Debug print: shape after reshape
+        out = out.view(out.size(0), self.output_window, self.output_size)
 
         return out
 
@@ -102,7 +95,6 @@ def load_model(model_path, input_size, hidden_size, output_size, output_window, 
         model.load_state_dict(torch.load(model_path, map_location=device))
     except Exception as e:
         st.error(f"Errore durante il caricamento dei pesi del modello: {e}")
-        st.error(f"Dettagli errore: {e}") # added to show full error message
         return None, device # Return None model and device
 
     model.eval()
@@ -150,37 +142,37 @@ def prepare_training_data(df, feature_columns, target_columns, input_window=INPU
 
 # Funzione per addestrare il modello
 def train_model(
-    X_train, y_train, X_val, y_val, input_size, output_size, output_window,
+    X_train, y_train, X_val, y_val, input_size, output_size, output_window, 
     hidden_size=128, num_layers=2, epochs=50, batch_size=32, learning_rate=0.001
 ):
     # Impostazione del device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
+    
     # Creazione del modello
     model = HydroLSTM(input_size, hidden_size, output_size, output_window, num_layers).to(device)
-
+    
     # Preparazione dei dataset
     train_dataset = TimeSeriesDataset(X_train, y_train)
     val_dataset = TimeSeriesDataset(X_val, y_val)
-
+    
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size)
-
+    
     # Definizione della funzione di perdita e dell'ottimizzatore
     criterion = nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
-
+    
     # Addestramento
     train_losses = []
     val_losses = []
     best_val_loss = float('inf')
     best_model = None
-
+    
     progress_bar = st.progress(0)
     status_text = st.empty()
     loss_chart = st.empty()
-
+    
     # Creazione del grafico interattivo di perdita
     def update_loss_chart(train_losses, val_losses):
         fig = go.Figure()
@@ -193,28 +185,28 @@ def train_model(
             height=400
         )
         loss_chart.plotly_chart(fig, use_container_width=True)
-
+    
     for epoch in range(epochs):
         # Training
         model.train()
         train_loss = 0
         for X_batch, y_batch in train_loader:
             X_batch, y_batch = X_batch.to(device), y_batch.to(device)
-
+            
             # Forward pass
             outputs = model(X_batch)
             loss = criterion(outputs, y_batch)
-
+            
             # Backward pass e ottimizzazione
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-
+            
             train_loss += loss.item()
-
+        
         train_loss /= len(train_loader)
         train_losses.append(train_loss)
-
+        
         # Validazione
         model.eval()
         val_loss = 0
@@ -224,38 +216,38 @@ def train_model(
                 outputs = model(X_batch)
                 loss = criterion(outputs, y_batch)
                 val_loss += loss.item()
-
+        
         val_loss /= len(val_loader)
         val_losses.append(val_loss)
-
+        
         # Aggiornamento dello scheduler
         scheduler.step(val_loss)
-
+        
         # Aggiornamento della progress bar e del testo di stato
         progress_bar.progress((epoch + 1) / epochs)
         status_text.text(f'Epoca {epoch+1}/{epochs} - Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}')
-
+        
         # Aggiornamento del grafico di perdita
         update_loss_chart(train_losses, val_losses)
-
+        
         # Salvataggio del modello migliore
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_model = model.state_dict().copy()
-
+        
         # Breve pausa per consentire l'aggiornamento dell'interfaccia
         time.sleep(0.1)
-
+    
     # Caricamento del modello migliore
     model.load_state_dict(best_model)
-
+    
     return model, train_losses, val_losses
 
 # Funzione per fare previsioni
 def predict(model, input_data, scaler_features, scaler_targets, target_columns, device, output_window):
     """
     Funzione per fare previsioni con il modello addestrato.
-
+    
     Args:
         model: Il modello addestrato
         input_data: Dati di input non normalizzati (array di forma [input_window, num_features])
@@ -264,7 +256,7 @@ def predict(model, input_data, scaler_features, scaler_targets, target_columns, 
         target_columns: Nomi dei target (sensori idrometrici)
         device: Dispositivo (CPU/GPU)
         output_window: Numero di timestep futuri da prevedere
-
+        
     Returns:
         Previsioni denormalizzate
     """
@@ -425,9 +417,7 @@ if use_demo_files or (data_file and model_file and scaler_features_file and scal
         input_size = len(feature_columns)
         output_size = len(target_columns)
         hidden_size = 128  # Parametro configurabile
-
-        st.sidebar.write(f"Output size check: {output_size * OUTPUT_WINDOW}") # debug line
-
+        
         if use_demo_files:
             model, device = load_model(MODEL_PATH, input_size, hidden_size, output_size, OUTPUT_WINDOW)
             scaler_features, scaler_targets = load_scalers(SCALER_FEATURES_PATH, SCALER_TARGETS_PATH)
@@ -781,21 +771,21 @@ elif page == 'Simulazione':
             else:
                 # Ottieni gli ultimi INPUT_WINDOW dati
                 last_data = df.iloc[-INPUT_WINDOW:].copy()
-
+                
                 # Creiamo un dataframe modificabile con i dati recenti
                 st.write(f"Ultimi {INPUT_WINDOW} dati (modifica i valori se necessario)")
-
+                
                 # Estraiamo le date per riferimento
                 dates = last_data['Data e Ora'].tolist()
-
+                
                 # Creiamo tabs per separare i diversi tipi di dati
                 data_tabs = st.tabs(["Cumulate Pioggia", "Umidità", "Idrometri"])
-
+                
                 # Estraiamo i dati attuali
                 rain_data_recent = last_data[rain_features].values
                 humidity_data_recent = last_data[humidity_feature].values
                 hydro_data_recent = last_data[hydro_features].values
-
+                
                 # Inizializziamo i dati modificati nel session_state se non esistono
                 if 'rain_data_recent' not in st.session_state:
                     st.session_state.rain_data_recent = rain_data_recent.copy()
@@ -803,103 +793,103 @@ elif page == 'Simulazione':
                     st.session_state.humidity_data_recent = humidity_data_recent.copy()
                 if 'hydro_data_recent' not in st.session_state:
                     st.session_state.hydro_data_recent = hydro_data_recent.copy()
-
+                
                 # Tab per la pioggia
                 with data_tabs[0]:
                     st.write("Modifica i valori di pioggia cumulata (mm)")
-
+                    
                     for feature_idx, feature in enumerate(rain_features):
                         st.write(f"### {feature}")
-
+                        
                         # Creiamo una tabella modificabile
                         for hour_idx in range(INPUT_WINDOW):
                             date_str = dates[hour_idx].strftime("%d/%m/%Y %H:%M")
-
+                            
                             # Chiave univoca per ogni input
                             input_key = f"rain_recent_{feature_idx}_{hour_idx}"
-
+                            
                             # Recupera il valore corrente o inizializza
                             if input_key not in st.session_state:
                                 st.session_state[input_key] = st.session_state.rain_data_recent[hour_idx, feature_idx]
-
+                            
                             # Input numerico per modificare il valore
                             value = st.number_input(
                                 f"{date_str}",
-                                0.0, 100.0,
+                                0.0, 100.0, 
                                 st.session_state[input_key], 0.5,
                                 key=input_key
                             )
-
+                            
                             # Aggiorna il valore
                             st.session_state.rain_data_recent[hour_idx, feature_idx] = value
-
+                
                 # Tab per l'umidità
                 with data_tabs[1]:
                     st.write("Modifica i valori di umidità (%)")
-
+                    
                     for feature_idx, feature in enumerate(humidity_feature):
                         st.write(f"### {feature}")
-
+                        
                         # Creiamo una tabella modificabile
                         for hour_idx in range(INPUT_WINDOW):
                             date_str = dates[hour_idx].strftime("%d/%m/%Y %H:%M")
-
+                            
                             # Chiave univoca per ogni input
                             input_key = f"humidity_recent_{feature_idx}_{hour_idx}"
-
+                            
                             # Recupera il valore corrente o inizializza
                             if input_key not in st.session_state:
                                 st.session_state[input_key] = st.session_state.humidity_data_recent[hour_idx, feature_idx]
-
+                            
                             # Input numerico per modificare il valore
                             value = st.number_input(
                                 f"{date_str}",
-                                0.0, 100.0,
+                                0.0, 100.0, 
                                 st.session_state[input_key], 0.5,
                                 key=input_key
                             )
-
+                            
                             # Aggiorna il valore
                             st.session_state.humidity_data_recent[hour_idx, feature_idx] = value
-
+                
                 # Tab per gli idrometri
                 with data_tabs[2]:
                     st.write("Modifica i livelli idrometrici (m)")
-
+                    
                     for feature_idx, feature in enumerate(hydro_features):
                         st.write(f"### {feature}")
-
+                        
                         # Creiamo una tabella modificabile
                         for hour_idx in range(INPUT_WINDOW):
                             date_str = dates[hour_idx].strftime("%d/%m/%Y %H:%M")
-
+                            
                             # Chiave univoca per ogni input
                             input_key = f"hydro_recent_{feature_idx}_{hour_idx}"
-
+                            
                             # Recupera il valore corrente o inizializza
                             if input_key not in st.session_state:
                                 st.session_state[input_key] = st.session_state.hydro_data_recent[hour_idx, feature_idx]
-
+                            
                             # Input numerico per modificare il valore
                             value = st.number_input(
                                 f"{date_str}",
-                                -1.0, 10.0,
+                                -1.0, 10.0, 
                                 st.session_state[input_key], 0.01,
                                 key=input_key
                             )
-
+                            
                             # Aggiorna il valore
                             st.session_state.hydro_data_recent[hour_idx, feature_idx] = value
-
+                
                 # Creiamo un dataframe modificato con i dati aggiornati
                 modified_df = last_data.copy()
                 modified_df[rain_features] = st.session_state.rain_data_recent
                 modified_df[humidity_feature] = st.session_state.humidity_data_recent
                 modified_df[hydro_features] = st.session_state.hydro_data_recent
-
+                
                 # Prepariamo i dati per la simulazione
                 sim_data = modified_df[feature_columns].values
-
+                
                 # Visualizziamo un'anteprima dei dati modificati
                 st.subheader("Anteprima dei dati modificati")
                 preview_df = pd.DataFrame(sim_data, columns=feature_columns)
@@ -990,7 +980,7 @@ elif page == 'Simulazione':
 
                             st.pyplot(fig)
                             sensor_name = feature.replace(' ', '_').replace('/', '_')
-                            st.markdown(get_image_download_link(fig, f"{sensor_name}.png", f"Scarica il grafico di {feature}"), unsafe_allow_html=True)
+                            st.markdown(get_image_download_link(fig, f"sim_{sensor_name}.png", f"Scarica il grafico di {feature}"), unsafe_allow_html=True)
 
 elif page == 'Analisi Dati Storici':
     st.header('Analisi Dati Storici')
@@ -1000,48 +990,48 @@ elif page == 'Analisi Dati Storici':
     else:
         # Selezione del range temporale
         st.subheader('Seleziona il periodo di analisi')
-
+        
         # Otteniamo il range di date disponibili
         min_date = df['Data e Ora'].min()
         max_date = df['Data e Ora'].max()
-
+        
         # Conversione in formato datetime per il selezione
         min_date_input = min_date.to_pydatetime()
         max_date_input = max_date.to_pydatetime()
-
+        
         # Selezione del range di date
         col1, col2 = st.columns(2)
         with col1:
             start_date = st.date_input('Data inizio', min_date_input, min_value=min_date_input, max_value=max_date_input)
         with col2:
             end_date = st.date_input('Data fine', max_date_input, min_value=min_date_input, max_value=max_date_input)
-
+        
         # Filtraggio dei dati in base al range selezionato
         mask = (df['Data e Ora'].dt.date >= start_date) & (df['Data e Ora'].dt.date <= end_date)
         filtered_df = df.loc[mask]
-
+        
         if len(filtered_df) == 0:
             st.warning("Nessun dato trovato nel periodo selezionato.")
         else:
             st.success(f"Trovati {len(filtered_df)} dati nel periodo selezionato.")
-
+            
             # Analisi statistica
             st.subheader('Analisi statistica')
-
+            
             # Selezione della feature da analizzare
             feature_to_analyze = st.selectbox(
                 'Seleziona la feature da analizzare',
                 feature_columns
             )
-
+            
             # Statistiche descrittive
             stats = filtered_df[feature_to_analyze].describe()
             stats_df = pd.DataFrame(stats).transpose()
             st.dataframe(stats_df.round(3))
-
+            
             # Visualizzazione dell'andamento temporale
             st.subheader('Andamento temporale')
-
+            
             fig, ax = plt.subplots(figsize=(12, 6))
             ax.plot(filtered_df['Data e Ora'], filtered_df[feature_to_analyze])
             ax.set_title(f'Andamento temporale di {feature_to_analyze}')
@@ -1051,32 +1041,32 @@ elif page == 'Analisi Dati Storici':
             plt.xticks(rotation=45)
             plt.tight_layout()
             st.pyplot(fig)
-
+            
             # Analisi di correlazione
             st.subheader('Analisi di correlazione')
-
+            
             # Selezione delle features per la correlazione
             corr_features = st.multiselect(
                 'Seleziona le features per la correlazione',
                 feature_columns,
                 default=[hydro_features[0], rain_features[0], humidity_feature[0]]
             )
-
+            
             if len(corr_features) > 1:
                 # Calcolo della matrice di correlazione
                 corr_matrix = filtered_df[corr_features].corr()
-
+                
                 # Visualizzazione della heatmap
                 fig, ax = plt.subplots(figsize=(10, 8))
                 sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', ax=ax)
                 ax.set_title('Matrice di correlazione')
                 plt.tight_layout()
                 st.pyplot(fig)
-
+                
                 # Scatterplot per coppie di features
                 if len(corr_features) == 2:
                     st.subheader('Scatterplot')
-
+                    
                     fig, ax = plt.subplots(figsize=(10, 6))
                     ax.scatter(filtered_df[corr_features[0]], filtered_df[corr_features[1]], alpha=0.5)
                     ax.set_title(f'Scatterplot: {corr_features[0]} vs {corr_features[1]}')
@@ -1087,10 +1077,10 @@ elif page == 'Analisi Dati Storici':
                     st.pyplot(fig)
             else:
                 st.info("Seleziona almeno due features per l'analisi di correlazione.")
-
+            
             # Distribuzione dei valori
             st.subheader('Distribuzione dei valori')
-
+            
             fig, ax = plt.subplots(figsize=(10, 6))
             sns.histplot(filtered_df[feature_to_analyze], kde=True, ax=ax)
             ax.set_title(f'Distribuzione di {feature_to_analyze}')
@@ -1099,7 +1089,7 @@ elif page == 'Analisi Dati Storici':
             ax.grid(True)
             plt.tight_layout()
             st.pyplot(fig)
-
+            
             # Download dei dati filtrati
             st.subheader('Download dei dati')
             st.markdown(get_table_download_link(filtered_df, "dati_filtrati.csv"), unsafe_allow_html=True)
@@ -1111,83 +1101,83 @@ elif page == 'Allenamento Modello':
         st.warning("Non sono stati caricati dati per l'addestramento. Carica un file CSV per procedere.")
     else:
         st.write(f"Dati disponibili: {len(df)} righe.")
-
+        
         # Opzioni di addestramento
         st.subheader('Configurazione dell\'addestramento')
-
+        
         # Selezione target (quali idrometri prevedere)
         st.write("Seleziona gli idrometri da prevedere:")
         selected_targets = []
-
+        
         # Creiamo una colonna per ogni idrometro
         columns = st.columns(len(hydro_features))
         for i, feature in enumerate(hydro_features):
             with columns[i]:
                 if st.checkbox(feature.split("[m]")[-1].strip(), value=True):
                     selected_targets.append(feature)
-
+        
         if len(selected_targets) == 0:
             st.warning("Seleziona almeno un idrometro da prevedere.")
         else:
             # Parametri del modello e dell'addestramento
             with st.expander("Parametri avanzati", expanded=False):
                 col1, col2 = st.columns(2)
-
+                
                 with col1:
                     # Finestre temporali
                     input_window = st.number_input("Finestra di input (ore)", min_value=1, max_value=72, value=INPUT_WINDOW)
                     output_window = st.number_input("Finestra di output (ore)", min_value=1, max_value=72, value=OUTPUT_WINDOW)
-
+                    
                     # Percentuale di validazione
                     val_split = st.slider("% dati di validazione", 5, 30, 20)
-
+                    
                 with col2:
                     # Parametri del modello
                     hidden_size = st.number_input("Dimensione hidden layer", min_value=16, max_value=512, value=128, step=16)
                     num_layers = st.number_input("Numero di layer", min_value=1, max_value=5, value=2)
-
+                    
                     # Parametri dell'addestramento
                     learning_rate = st.number_input("Learning rate", min_value=0.0001, max_value=0.1, value=0.001, format="%.4f")
                     batch_size = st.number_input("Batch size", min_value=8, max_value=256, value=32, step=8)
-
+            
             # Numero di epoche
             epochs = st.slider("Numero di epoche", 10, 200, 50)
-
+            
             # Bottone per avviare l'addestramento
             train_button = st.button("Addestra modello", type="primary")
-
+            
             if train_button:
                 with st.spinner('Preparazione dei dati in corso...'):
                     # Preparazione dei dati
                     X_train, y_train, X_val, y_val, scaler_features, scaler_targets = prepare_training_data(
                         df, feature_columns, selected_targets, input_window, output_window, val_split
                     )
-
+                    
                     st.success(f"Dati preparati: {len(X_train)} esempi di training, {len(X_val)} esempi di validazione")
-
+                    
                     # Visualizzazione della forma dei dati
                     st.write(f"Forma dei dati di input: {X_train.shape}")
                     st.write(f"Forma dei dati di output: {y_train.shape}")
-
+                
                 # Addestramento del modello
                 st.subheader("Addestramento in corso")
-
+                
                 # Calcolo dell'input_size basato sulle feature
                 input_size = len(feature_columns)
                 output_size = len(selected_targets)
-
+                
                 st.write(f"Dimensione input: {input_size}, Dimensione output: {output_size}")
-
+                
                 # Addestramento
                 model, train_losses, val_losses = train_model(
                     X_train, y_train, X_val, y_val,
                     input_size, output_size, output_window,
                     hidden_size, num_layers, epochs, batch_size, learning_rate
                 )
-
+                
                 # Visualizzazione dei risultati
                 st.success("Addestramento completato!")
-
+                
                 # Grafico della loss finale
                 st.subheader("Andamento della loss durante l'addestramento")
                 fig, ax = plt.subplots(figsize=(10, 6))
@@ -1199,29 +1189,29 @@ elif page == 'Allenamento Modello':
                 ax.legend()
                 ax.grid(True)
                 st.pyplot(fig)
-
+                
                 # Salvataggio del modello e degli scaler
                 st.subheader("Download del modello e degli scaler")
-
+                
                 # Salvataggio del modello
                 model_buffer = io.BytesIO()
                 torch.save(model.state_dict(), model_buffer)
                 model_buffer.seek(0)
-
+                
                 # Salvataggio degli scaler
                 scaler_features_buffer = io.BytesIO()
                 joblib.dump(scaler_features, scaler_features_buffer)
                 scaler_features_buffer.seek(0)
-
+                
                 scaler_targets_buffer = io.BytesIO()
                 joblib.dump(scaler_targets, scaler_targets_buffer)
                 scaler_targets_buffer.seek(0)
-
+                
                 # Link per il download
                 st.markdown(get_binary_file_download_link(model_buffer, "best_hydro_model.pth", "Scarica il modello addestrato"), unsafe_allow_html=True)
                 st.markdown(get_binary_file_download_link(scaler_features_buffer, "scaler_features.joblib", "Scarica lo scaler features"), unsafe_allow_html=True)
                 st.markdown(get_binary_file_download_link(scaler_targets_buffer, "scaler_targets.joblib", "Scarica lo scaler targets"), unsafe_allow_html=True)
-
+                
                 # Info sul modello
                 st.subheader("Informazioni sul modello")
                 model_info = {
@@ -1233,51 +1223,51 @@ elif page == 'Allenamento Modello':
                     "Sensori previsti": ", ".join(selected_targets),
                     "Data di addestramento": datetime.now().strftime("%d/%m/%Y %H:%M")
                 }
-
+                
                 # Visualizzazione delle info sul modello
                 st.json(model_info)
-
+                
                 # Esempio di utilizzo del modello per previsione
                 st.subheader("Test del modello")
-
+                
                 if st.button("Esegui test su dati di validazione"):
                     with st.spinner("Esecuzione test in corso..."):
                         # Prendiamo un esempio dal set di validazione
                         sample_idx = np.random.randint(0, len(X_val))
                         sample_input = X_val[sample_idx]
                         sample_target = y_val[sample_idx]
-
+                        
                         # Convertiamo in tensor
                         sample_input_tensor = torch.FloatTensor(sample_input).unsqueeze(0).to(device)
-
+                        
                         # Previsione
                         model.eval()
                         with torch.no_grad():
                             sample_output = model(sample_input_tensor)
-
+                        
                         # Conversione in numpy
                         sample_output_np = sample_output.cpu().numpy().reshape(-1, len(selected_targets))
-
+                        
                         # Denormalizzazione
                         sample_input_original = scaler_features.inverse_transform(sample_input.reshape(-1, input_size)).reshape(input_window, input_size)
                         sample_target_original = scaler_targets.inverse_transform(sample_target.reshape(-1, len(selected_targets))).reshape(output_window, len(selected_targets))
                         sample_output_original = scaler_targets.inverse_transform(sample_output_np)
-
+                        
                         # Creazione di un dataframe per visualizzazione
                         test_results = pd.DataFrame()
-
+                        
                         for i, target in enumerate(selected_targets):
                             target_name = target.split("[m]")[-1].strip()
                             test_results[f'Target {target_name}'] = sample_target_original[:, i]
                             test_results[f'Previsione {target_name}'] = sample_output_original[:, i]
-
+                        
                         # Visualizzazione dei risultati
                         st.dataframe(test_results.round(3))
-
+                        
                         # Grafico dei risultati
                         for i, target in enumerate(selected_targets):
                             target_name = target.split("[m]")[-1].strip()
-
+                            
                             fig, ax = plt.subplots(figsize=(10, 6))
                             ax.plot(sample_target_original[:, i], 'b-', label=f'Target {target_name}')
                             ax.plot(sample_output_original[:, i], 'r--', label=f'Previsione {target_name}')
