@@ -77,9 +77,7 @@ class HydroLSTM(nn.Module):
 
         # Reshaping per ottenere la sequenza di output
         # out shape: (batch_size, output_window, output_size)
-        out = out.view(out.size(0), out.size(0), self.output_size) # corrected view to out.size(0), self.output_window, self.output_size
-        out = out.view(out.size(0), self.output_window, self.output_size) # corrected view to out.size(0), self.output_window, self.output_size
-
+        out = out.view(-1, self.output_window, self.output_size)
 
         return out
 
