@@ -1,10 +1,9 @@
 streamlit
-seaborn
 torch
 pandas
 numpy
 matplotlib
+seaborn
 scikit-learn
-plotly
-altair
 joblib
+plotly
